@@ -2,6 +2,13 @@
 import express from 'express';
 import { Pool } from 'pg';
 import { execSync } from 'child_process';
+import {
+  createApiKey,
+  listApiKeys,
+  getApiKeyById,
+  revokeApiKey,
+  deleteApiKey
+} from '../db/queries';
 
 export function createRouter(db: Pool) {
   const router = express.Router();
@@ -102,6 +109,125 @@ export function createRouter(db: Pool) {
     );
     
     res.json({ status: 'logged' });
+  });
+
+  // ============================================
+  // Admin API Key Management Endpoints
+  // ============================================
+
+  // Create a new API key
+  router.post('/admin/keys', async (req, res) => {
+    try {
+      const { name, metadata = {} } = req.body;
+
+      if (!name || typeof name !== 'string') {
+        res.status(400).json({
+          error: 'Name is required',
+          code: 'MISSING_NAME'
+        });
+        return;
+      }
+
+      const apiKey = await createApiKey(db, name, metadata);
+
+      // Return the full key only on creation (this is the only time it's visible)
+      res.status(201).json({
+        id: apiKey.id,
+        key: apiKey.key,
+        name: apiKey.name,
+        created_at: apiKey.created_at,
+        message: 'Store this key securely. It will not be shown again.'
+      });
+    } catch (error) {
+      console.error('Error creating API key:', error);
+      res.status(500).json({
+        error: 'Failed to create API key',
+        code: 'CREATE_KEY_ERROR'
+      });
+    }
+  });
+
+  // List all API keys (without exposing key values)
+  router.get('/admin/keys', async (req, res) => {
+    try {
+      const keys = await listApiKeys(db);
+      res.json(keys);
+    } catch (error) {
+      console.error('Error listing API keys:', error);
+      res.status(500).json({
+        error: 'Failed to list API keys',
+        code: 'LIST_KEYS_ERROR'
+      });
+    }
+  });
+
+  // Get a single API key by ID
+  router.get('/admin/keys/:id', async (req, res) => {
+    try {
+      const key = await getApiKeyById(db, req.params.id);
+
+      if (!key) {
+        res.status(404).json({
+          error: 'API key not found',
+          code: 'KEY_NOT_FOUND'
+        });
+        return;
+      }
+
+      res.json(key);
+    } catch (error) {
+      console.error('Error getting API key:', error);
+      res.status(500).json({
+        error: 'Failed to get API key',
+        code: 'GET_KEY_ERROR'
+      });
+    }
+  });
+
+  // Revoke an API key (soft delete - sets active = false)
+  router.patch('/admin/keys/:id/revoke', async (req, res) => {
+    try {
+      const revoked = await revokeApiKey(db, req.params.id);
+
+      if (!revoked) {
+        res.status(404).json({
+          error: 'API key not found',
+          code: 'KEY_NOT_FOUND'
+        });
+        return;
+      }
+
+      res.json({ status: 'revoked', id: req.params.id });
+    } catch (error) {
+      console.error('Error revoking API key:', error);
+      res.status(500).json({
+        error: 'Failed to revoke API key',
+        code: 'REVOKE_KEY_ERROR'
+      });
+    }
+  });
+
+  // Delete an API key permanently
+  router.delete('/admin/keys/:id', async (req, res) => {
+    try {
+      const deleted = await deleteApiKey(db, req.params.id);
+
+      if (!deleted) {
+        res.status(404).json({
+          error: 'API key not found',
+          code: 'KEY_NOT_FOUND'
+        });
+        return;
+      }
+
+      res.json({ status: 'deleted', id: req.params.id });
+    } catch (error) {
+      console.error('Error deleting API key:', error);
+      res.status(500).json({
+        error: 'Failed to delete API key',
+        code: 'DELETE_KEY_ERROR'
+      });
+    }
   });
 
   return router;

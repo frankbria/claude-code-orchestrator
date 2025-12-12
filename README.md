@@ -90,9 +90,21 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for detailed architecture documentation.
    DATABASE_URL=postgresql://user:password@localhost:5432/claude_orchestrator
    API_PORT=3001
    WORKSPACE_BASE=/tmp/claude-workspaces
+   CLAUDE_HOOK_SECRET=your-optional-hook-secret
    ```
 
-5. **Configure Claude Code hooks**
+5. **Generate an API key**
+
+   After starting the server, create your first API key:
+   ```bash
+   curl -X POST http://localhost:3001/api/admin/keys \
+     -H 'Content-Type: application/json' \
+     -d '{"name": "Initial Admin Key"}'
+   ```
+
+   Save the returned key securely - it won't be shown again.
+
+6. **Configure Claude Code hooks**
 
    Add to `~/.claude/settings.json`:
    ```json
@@ -108,7 +120,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for detailed architecture documentation.
    }
    ```
 
-6. **Start the services**
+7. **Start the services**
    ```bash
    # Terminal 1: API server
    npx tsx src/index.ts
@@ -117,7 +129,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for detailed architecture documentation.
    cd dashboard && npm start
    ```
 
-7. **Access the dashboard**
+8. **Access the dashboard**
 
    Open http://localhost:3000
 
@@ -125,9 +137,12 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for detailed architecture documentation.
 
 ### Creating a Session via API
 
+All API requests (except hooks) require an API key in the `x-api-key` header:
+
 ```bash
 curl -X POST http://localhost:3001/api/sessions \
   -H 'Content-Type: application/json' \
+  -H 'x-api-key: YOUR_API_KEY' \
   -d '{
     "projectType": "github",
     "githubRepo": "owner/repo",
@@ -189,10 +204,22 @@ claude --print --resume <claude-session-id> -p "Now check the database queries"
 
 - `GET /api/sessions/:id/logs?limit=50` - Get tool execution history
 
-### Hooks
+### Hooks (No Authentication Required)
 
 - `POST /api/hooks/tool-complete` - Log tool execution (called by Claude Code)
 - `POST /api/hooks/notification` - Log notification (called by Claude Code)
+
+### Admin (API Key Management)
+
+- `POST /api/admin/keys` - Create new API key
+- `GET /api/admin/keys` - List all API keys (without key values)
+- `GET /api/admin/keys/:id` - Get API key details
+- `PATCH /api/admin/keys/:id/revoke` - Revoke an API key
+- `DELETE /api/admin/keys/:id` - Delete an API key permanently
+
+### Health Check
+
+- `GET /health` - Health check endpoint (no authentication)
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for complete API documentation.
 
@@ -232,8 +259,10 @@ PostgreSQL tables:
 - **session_messages**: Conversation history (direction, content, source, timestamp)
 - **command_logs**: Tool execution logs (tool, input JSONB, result, duration_ms)
 - **slack_thread_mapping**: Maps Slack thread_ts to session_id
+- **api_keys**: API key authentication (id, key, name, active, last_used_at, metadata JSONB)
 
 Schema file: `src/db/schema.sql`
+Migration: `src/db/migrations/001_add_api_keys.sql`
 
 ## Configuration
 
@@ -244,6 +273,7 @@ Schema file: `src/db/schema.sql`
 | `DATABASE_URL` | PostgreSQL connection string | Required |
 | `API_PORT` | API server port | `3001` |
 | `WORKSPACE_BASE` | Base directory for workspaces | `/tmp/claude-workspaces` |
+| `CLAUDE_HOOK_SECRET` | Shared secret for hook authentication | - (hooks open) |
 | `N8N_WEBHOOK_BASE` | n8n webhook URL | - |
 | `SLACK_BOT_TOKEN` | Slack bot token | - |
 | `SLACK_SIGNING_SECRET` | Slack signing secret | - |
@@ -268,13 +298,17 @@ claude-orchestrator/
 ├── src/
 │   ├── index.ts              # Express server entry point
 │   ├── api/
-│   │   ├── routes.ts         # Main REST endpoints
+│   │   ├── routes.ts         # Main REST endpoints + admin API
 │   │   └── hooks.ts          # Claude Code hook receivers
+│   ├── middleware/
+│   │   └── auth.ts           # API key authentication middleware
 │   ├── services/
 │   │   └── workspace.ts      # Git/folder operations
 │   └── db/
 │       ├── schema.sql        # PostgreSQL schema
-│       └── queries.ts        # Database query helpers
+│       ├── queries.ts        # Database query helpers
+│       └── migrations/       # Database migrations
+│           └── 001_add_api_keys.sql
 ├── dashboard/
 │   └── src/
 │       ├── components/       # React components
@@ -320,7 +354,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for complete Docker Compose configuration
 
 ### Production Considerations
 
-1. **Authentication**: Add API key middleware for production
+1. **Authentication**: API key authentication is implemented for all `/api/*` routes
 2. **SSL/TLS**: Use reverse proxy (nginx) with Let's Encrypt
 3. **Database**: Use managed PostgreSQL (AWS RDS, etc.)
 4. **Monitoring**: Add Prometheus metrics and Grafana dashboards
@@ -400,7 +434,7 @@ MIT License - see [LICENSE](LICENSE) file for details.
 - [ ] E2B sandbox support
 
 ### Phase 3: Production Readiness
-- [ ] Authentication & authorization
+- [x] Authentication & authorization (API key authentication)
 - [ ] Prometheus metrics & monitoring
 - [ ] Docker Compose deployment
 - [ ] Automated tests (unit + E2E)
