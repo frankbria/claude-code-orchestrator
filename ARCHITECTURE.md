@@ -347,23 +347,38 @@ CREATE TABLE slack_thread_mapping (
     created_at TIMESTAMP DEFAULT NOW()
 );
 
+-- API Keys for authentication
+CREATE TABLE api_keys (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    key VARCHAR(64) UNIQUE NOT NULL,
+    name VARCHAR(255) NOT NULL,
+    active BOOLEAN DEFAULT true,
+    created_at TIMESTAMP DEFAULT NOW(),
+    last_used_at TIMESTAMP,
+    metadata JSONB DEFAULT '{}'
+);
+
 -- Indexes for common queries
 CREATE INDEX idx_sessions_status ON sessions(status);
 CREATE INDEX idx_sessions_updated ON sessions(updated_at DESC);
 CREATE INDEX idx_messages_session ON session_messages(session_id, timestamp);
 CREATE INDEX idx_logs_session ON command_logs(session_id, timestamp DESC);
 CREATE INDEX idx_slack_session ON slack_thread_mapping(session_id);
+CREATE INDEX idx_api_keys_active_key ON api_keys(key) WHERE active = true;
 ```
 
 ---
 
 ## API Reference
 
+**Authentication:** All `/api/*` endpoints (except `/api/hooks/*`) require an API key in the `x-api-key` header.
+
 ### Sessions
 
 #### Create Session
 ```
 POST /api/sessions
+Headers: x-api-key: YOUR_API_KEY
 
 Body:
 {
@@ -385,6 +400,7 @@ Response:
 #### List Sessions
 ```
 GET /api/sessions
+Headers: x-api-key: YOUR_API_KEY
 
 Response:
 [
@@ -402,6 +418,7 @@ Response:
 #### Get Session Details
 ```
 GET /api/sessions/:id
+Headers: x-api-key: YOUR_API_KEY
 
 Response:
 {
@@ -419,6 +436,7 @@ Response:
 #### Update Session
 ```
 PATCH /api/sessions/:id
+Headers: x-api-key: YOUR_API_KEY
 
 Body:
 {
@@ -435,6 +453,7 @@ Response:
 #### Get Session Messages
 ```
 GET /api/sessions/:id/messages
+Headers: x-api-key: YOUR_API_KEY
 
 Response:
 [
@@ -458,6 +477,7 @@ Response:
 #### Add Message
 ```
 POST /api/sessions/:id/messages
+Headers: x-api-key: YOUR_API_KEY
 
 Body:
 {
@@ -475,6 +495,7 @@ Response:
 #### Get Session Logs
 ```
 GET /api/sessions/:id/logs?limit=50
+Headers: x-api-key: YOUR_API_KEY
 
 Response:
 [
@@ -495,6 +516,7 @@ Response:
 #### Tool Complete Hook
 ```
 POST /api/hooks/tool-complete
+Headers: x-hook-secret: YOUR_HOOK_SECRET (optional, if CLAUDE_HOOK_SECRET is set)
 
 Body:
 {
@@ -511,6 +533,7 @@ Response: 200 OK
 #### Notification Hook
 ```
 POST /api/hooks/notification
+Headers: x-hook-secret: YOUR_HOOK_SECRET (optional, if CLAUDE_HOOK_SECRET is set)
 
 Body:
 {
@@ -520,6 +543,104 @@ Body:
 
 Response: 200 OK
 ```
+
+### Admin (API Key Management)
+
+**Authorization:** All admin endpoints require an API key with `admin: true` in the metadata. Non-admin keys will receive a 403 Forbidden response.
+
+**Bootstrap:** Create the first admin key using the CLI script:
+```bash
+npx tsx scripts/create-admin-key.ts "Initial Admin Key"
+```
+
+#### Create API Key
+```
+POST /api/admin/keys
+Headers: x-api-key: YOUR_ADMIN_API_KEY
+
+Body:
+{
+  "name": "n8n-integration",
+  "metadata": { 
+    "owner": "automation-team",
+    "admin": true  // Set to true for admin privileges
+  }
+}
+
+Response:
+{
+  "id": "uuid",
+  "key": "64-character-hex-string",  // Only shown once!
+  "name": "n8n-integration",
+  "created_at": "2024-01-15T10:30:00Z",
+  "message": "Store this key securely. It will not be shown again."
+}
+```
+
+#### List API Keys
+```
+GET /api/admin/keys
+Headers: x-api-key: YOUR_ADMIN_API_KEY
+
+Response:
+[
+  {
+    "id": "uuid",
+    "name": "n8n-integration",
+    "active": true,
+    "created_at": "2024-01-15T10:30:00Z",
+    "last_used_at": "2024-01-15T11:00:00Z",
+    "metadata": { "owner": "automation-team" }
+  }
+]
+```
+
+#### Get API Key Details
+```
+GET /api/admin/keys/:id
+Headers: x-api-key: YOUR_ADMIN_API_KEY
+
+Response:
+{
+  "id": "uuid",
+  "name": "n8n-integration",
+  "active": true,
+  "created_at": "2024-01-15T10:30:00Z",
+  "last_used_at": "2024-01-15T11:00:00Z",
+  "metadata": { "owner": "automation-team" }
+}
+```
+
+#### Revoke API Key
+```
+PATCH /api/admin/keys/:id/revoke
+Headers: x-api-key: YOUR_ADMIN_API_KEY
+
+Response:
+{ "status": "revoked", "id": "uuid" }
+```
+
+#### Delete API Key
+```
+DELETE /api/admin/keys/:id
+Headers: x-api-key: YOUR_ADMIN_API_KEY
+
+Response:
+{ "status": "deleted", "id": "uuid" }
+```
+
+### Health Check
+
+#### Health Status
+```
+GET /health
+Headers: (none - unauthenticated endpoint)
+
+Response:
+{ "status": "ok", "timestamp": "2024-01-15T10:30:00Z" }
+```
+
+**Security Note:** The `/health` endpoint is intentionally unauthenticated for monitoring and load balancer health checks. It only exposes server status and timestamp, no sensitive information. In production deployments, consider restricting access via firewall rules or reverse proxy configuration if needed.
 
 ---
 
@@ -1184,22 +1305,95 @@ router.post('/tool-complete', async (req, res) => {
 
 ### API Authentication
 
-For production, add authentication middleware:
+The system uses database-backed API key authentication for all `/api/*` routes (except hooks):
 
 ```typescript
 // src/middleware/auth.ts
-export function apiKeyAuth(req: Request, res: Response, next: NextFunction) {
-  const apiKey = req.headers['x-api-key'];
-  
-  if (!apiKey || apiKey !== process.env.API_KEY) {
-    return res.status(401).json({ error: 'Unauthorized' });
-  }
-  
-  next();
+import { Pool } from 'pg';
+import { validateApiKey } from '../db/queries';
+
+export function createApiKeyAuth(db: Pool) {
+  return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    const apiKey = req.headers['x-api-key'];
+
+    if (!apiKey || typeof apiKey !== 'string') {
+      res.status(401).json({ error: 'API key required', code: 'MISSING_API_KEY' });
+      return;
+    }
+
+    const keyRecord = await validateApiKey(db, apiKey);
+    if (!keyRecord) {
+      res.status(401).json({ error: 'Invalid API key', code: 'INVALID_API_KEY' });
+      return;
+    }
+
+    req.apiKey = keyRecord; // Attach for downstream use
+    next();
+  };
 }
 
-// Apply to routes
-app.use('/api/sessions', apiKeyAuth, sessionRoutes);
+// Applied in index.ts:
+app.use('/api/hooks', hookAuth, createHookRouter(db)); // Separate auth for hooks
+app.use('/api', apiKeyAuth, createRouter(db));         // API key auth for all other routes
+```
+
+### API Key Management
+
+API keys are stored in the `api_keys` table with:
+- Unique 64-character hex key (generated via `crypto.randomBytes(32)`)
+- `last_used_at` timestamp updated on each successful authentication (tracks actual API usage)
+- `active` flag for soft revocation (revoked keys remain in database for audit)
+- JSONB metadata for extensibility (e.g., `{"admin": true, "owner": "team-name"}`)
+
+**Authorization Model:**
+- Admin endpoints require `metadata.admin = true` on the authenticating API key
+- Non-admin keys receive 403 Forbidden when accessing admin endpoints
+- First admin key must be created via CLI: `npx tsx scripts/create-admin-key.ts`
+
+Admin endpoints for key management:
+- `POST /api/admin/keys` - Create new key (returns key once, never again) - **Requires admin**
+- `GET /api/admin/keys` - List keys (without exposing key values) - **Requires admin**
+- `PATCH /api/admin/keys/:id/revoke` - Revoke a key - **Requires admin**
+- `DELETE /api/admin/keys/:id` - Permanently delete a key - **Requires admin**
+
+### Hook Authentication
+
+Hook endpoints use optional shared secret authentication via the `CLAUDE_HOOK_SECRET` environment variable:
+
+**⚠️ Production Security:** If `CLAUDE_HOOK_SECRET` is not set, hook endpoints are **unauthenticated** and a warning is logged. This is acceptable for development but **should not be used in production**. Always set `CLAUDE_HOOK_SECRET` in production environments to prevent unauthorized hook submissions.
+
+The implementation uses constant-time comparison to prevent timing attacks:
+
+```typescript
+// src/middleware/auth.ts
+export function createHookAuth() {
+  return (req: Request, res: Response, next: NextFunction): void => {
+    const hookSecret = process.env.CLAUDE_HOOK_SECRET;
+
+    // If no hook secret configured, allow all requests (development mode only!)
+    if (!hookSecret) {
+      console.warn('CLAUDE_HOOK_SECRET not set - hook endpoints are unauthenticated. Set this in production!');
+      next();
+      return;
+    }
+
+    const providedSecret = req.headers['x-hook-secret'];
+    // Uses crypto.timingSafeEqual for constant-time comparison
+    // (implementation details in source code)
+  };
+}
+```
+
+When `CLAUDE_HOOK_SECRET` is set, Claude Code hooks must include the secret:
+```json
+{
+  "hooks": {
+    "postToolUse": [{
+      "matcher": "*",
+      "command": "curl -sS -X POST http://localhost:3001/api/hooks/tool-complete -H 'x-hook-secret: YOUR_SECRET' -H 'Content-Type: application/json' ..."
+    }]
+  }
+}
 ```
 
 ### Hook Validation
@@ -1213,11 +1407,11 @@ router.post('/tool-complete', async (req, res) => {
     'SELECT id FROM sessions WHERE claude_session_id = $1 AND status = $2',
     [req.body.session, 'active']
   );
-  
+
   if (!session.rows.length) {
     return res.status(404).json({ error: 'Session not found or inactive' });
   }
-  
+
   // Proceed with logging...
 });
 ```
