@@ -1,7 +1,6 @@
 // src/api/routes.ts
 import express, { Request, Response, NextFunction } from 'express';
 import { Pool } from 'pg';
-import { execSync } from 'child_process';
 import {
   createApiKey,
   listApiKeys,
@@ -9,6 +8,15 @@ import {
   revokeApiKey,
   deleteApiKey
 } from '../db/queries';
+import { WorkspaceManager } from '../services/workspace';
+import {
+  validateSessionCreate,
+  workspaceCreationLimiter,
+  addRequestId
+} from '../middleware/validation';
+import { createLogger } from '../utils/logger';
+
+const apiLogger = createLogger('api');
 
 /**
  * Middleware to require admin privileges
@@ -39,36 +47,86 @@ function requireAdmin(req: Request, res: Response, next: NextFunction): void {
 export function createRouter(db: Pool) {
   const router = express.Router();
 
+  // Initialize WorkspaceManager for secure workspace operations
+  const workspaceManager = new WorkspaceManager();
+
+  // Add request ID to all routes for audit trail correlation
+  router.use(addRequestId);
+
   // Create new session (called by n8n)
-  router.post('/sessions', async (req, res) => {
-    const { projectType, projectPath, githubRepo, initialPrompt, slackChannel } = req.body;
-    
-    // Prepare workspace based on project type
-    let workspacePath = projectPath;
-    if (projectType === 'github' && githubRepo) {
-      const repoName = githubRepo.split('/').pop()?.replace('.git', '');
-      workspacePath = `/tmp/claude-workspaces/${repoName}-${Date.now()}`;
-      execSync(`gh repo clone ${githubRepo} ${workspacePath}`);
+  // SECURITY: Rate limited and validated before processing
+  router.post('/sessions',
+    workspaceCreationLimiter,  // Rate limit: 10 req/15min per IP
+    validateSessionCreate,     // Validate and sanitize inputs
+    async (req, res) => {
+      const { projectType, projectPath, githubRepo, initialPrompt, slackChannel } = req.body;
+      const requestId = (req as any).id;
+
+      try {
+        apiLogger.info('Session creation started', {
+          requestId,
+          projectType,
+          timestamp: new Date().toISOString(),
+        });
+
+        // Prepare workspace with full security validation
+        // This replaces the vulnerable direct path/execSync usage
+        const workspacePath = await workspaceManager.prepareWorkspace({
+          projectType,
+          projectPath,
+          githubRepo,
+          basePath: projectPath, // For worktree type
+        }, requestId);
+
+        // Create session record
+        const result = await db.query(
+          `INSERT INTO sessions (project_path, project_type, metadata)
+           VALUES ($1, $2, $3) RETURNING id`,
+          [workspacePath, projectType, JSON.stringify({
+            initialPrompt,
+            slackChannel,
+            requestId,
+            createdAt: new Date().toISOString(),
+          })]
+        );
+
+        const sessionId = result.rows[0].id;
+
+        // Log the initial prompt
+        await db.query(
+          `INSERT INTO session_messages (session_id, direction, content, source)
+           VALUES ($1, 'user', $2, 'n8n')`,
+          [sessionId, initialPrompt]
+        );
+
+        apiLogger.info('Session created successfully', {
+          requestId,
+          sessionId,
+          timestamp: new Date().toISOString(),
+        });
+
+        res.status(201).json({
+          sessionId,
+          workspacePath,
+          status: 'created',
+          requestId,
+        });
+      } catch (error) {
+        apiLogger.error('Session creation failed', {
+          requestId,
+          error: (error as Error).message,
+          timestamp: new Date().toISOString(),
+        });
+
+        // Generic error message to client (details logged server-side)
+        res.status(400).json({
+          error: 'Session creation failed',
+          details: 'Invalid request',
+          requestId,
+        });
+      }
     }
-    
-    // Create session record
-    const result = await db.query(
-      `INSERT INTO sessions (project_path, project_type, metadata)
-       VALUES ($1, $2, $3) RETURNING id`,
-      [workspacePath, projectType, JSON.stringify({ initialPrompt, slackChannel })]
-    );
-    
-    const sessionId = result.rows[0].id;
-    
-    // Log the initial prompt
-    await db.query(
-      `INSERT INTO session_messages (session_id, direction, content, source)
-       VALUES ($1, 'user', $2, 'n8n')`,
-      [sessionId, initialPrompt]
-    );
-    
-    res.json({ sessionId, workspacePath, status: 'created' });
-  });
+  );
 
   // Get session logs (dashboard polling endpoint)
   router.get('/sessions/:id/logs', async (req, res) => {
