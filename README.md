@@ -129,7 +129,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for detailed architecture documentation.
 
 8. **Access the dashboard**
 
-   Open http://localhost:3000
+   Open <http://localhost:3000>
 
 ## Usage
 
@@ -176,7 +176,7 @@ claude --print --resume <claude-session-id> -p "Now check the database queries"
 
 ### Viewing Sessions in Dashboard
 
-1. Navigate to http://localhost:3000
+1. Navigate to <http://localhost:3000>
 2. View list of all sessions
 3. Click on a session to see:
    - Conversation history
