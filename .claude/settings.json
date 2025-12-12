@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "postToolUse": [
+      {
+        "matcher": "*",
+        "command": "curl -X POST http://localhost:3001/api/hooks/tool-complete -H 'Content-Type: application/json' -d '{\"session\": \"$CLAUDE_SESSION_ID\", \"tool\": \"$TOOL_NAME\", \"result\": \"$TOOL_RESULT\"}'"
+      }
+    ],
+    "notification": [
+      {
+        "command": "curl -X POST http://localhost:3001/api/hooks/notification -H 'Content-Type: application/json' -d '{\"session\": \"$CLAUDE_SESSION_ID\", \"message\": \"$MESSAGE\"}'"
+      }
+    ]
+  }
+}
