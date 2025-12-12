@@ -1,5 +1,5 @@
 // src/api/routes.ts
-import express from 'express';
+import express, { Request, Response, NextFunction } from 'express';
 import { Pool } from 'pg';
 import { execSync } from 'child_process';
 import {
@@ -9,6 +9,32 @@ import {
   revokeApiKey,
   deleteApiKey
 } from '../db/queries';
+
+/**
+ * Middleware to require admin privileges
+ * Checks if the authenticated API key has admin=true in metadata
+ */
+function requireAdmin(req: Request, res: Response, next: NextFunction): void {
+  if (!req.apiKey) {
+    res.status(401).json({
+      error: 'Authentication required',
+      code: 'MISSING_AUTH'
+    });
+    return;
+  }
+
+  const isAdmin = req.apiKey.metadata?.admin === true;
+  
+  if (!isAdmin) {
+    res.status(403).json({
+      error: 'Admin privileges required',
+      code: 'INSUFFICIENT_PERMISSIONS'
+    });
+    return;
+  }
+
+  next();
+}
 
 export function createRouter(db: Pool) {
   const router = express.Router();
@@ -116,7 +142,7 @@ export function createRouter(db: Pool) {
   // ============================================
 
   // Create a new API key
-  router.post('/admin/keys', async (req, res) => {
+  router.post('/admin/keys', requireAdmin, async (req, res) => {
     try {
       const { name, metadata = {} } = req.body;
 
@@ -128,7 +154,47 @@ export function createRouter(db: Pool) {
         return;
       }
 
-      const apiKey = await createApiKey(db, name, metadata);
+      // Validate metadata is an object
+      if (typeof metadata !== 'object' || metadata === null || Array.isArray(metadata)) {
+        res.status(400).json({
+          error: 'Metadata must be a valid object',
+          code: 'INVALID_METADATA'
+        });
+        return;
+      }
+
+      // Sanitize metadata - only allow safe types and reasonable sizes
+      const sanitizedMetadata: Record<string, any> = {};
+      for (const [key, value] of Object.entries(metadata)) {
+        if (typeof key !== 'string' || key.length > 100) {
+          res.status(400).json({
+            error: 'Metadata keys must be strings with max 100 characters',
+            code: 'INVALID_METADATA_KEY'
+          });
+          return;
+        }
+        
+        const valueType = typeof value;
+        if (!['string', 'number', 'boolean'].includes(valueType)) {
+          res.status(400).json({
+            error: 'Metadata values must be strings, numbers, or booleans',
+            code: 'INVALID_METADATA_VALUE'
+          });
+          return;
+        }
+        
+        if (valueType === 'string' && (value as string).length > 1000) {
+          res.status(400).json({
+            error: 'Metadata string values must be less than 1000 characters',
+            code: 'METADATA_VALUE_TOO_LONG'
+          });
+          return;
+        }
+        
+        sanitizedMetadata[key] = value;
+      }
+
+      const apiKey = await createApiKey(db, name, sanitizedMetadata);
 
       // Return the full key only on creation (this is the only time it's visible)
       res.status(201).json({
@@ -148,7 +214,7 @@ export function createRouter(db: Pool) {
   });
 
   // List all API keys (without exposing key values)
-  router.get('/admin/keys', async (req, res) => {
+  router.get('/admin/keys', requireAdmin, async (req, res) => {
     try {
       const keys = await listApiKeys(db);
       res.json(keys);
@@ -162,7 +228,7 @@ export function createRouter(db: Pool) {
   });
 
   // Get a single API key by ID
-  router.get('/admin/keys/:id', async (req, res) => {
+  router.get('/admin/keys/:id', requireAdmin, async (req, res) => {
     try {
       const key = await getApiKeyById(db, req.params.id);
 
@@ -185,7 +251,7 @@ export function createRouter(db: Pool) {
   });
 
   // Revoke an API key (soft delete - sets active = false)
-  router.patch('/admin/keys/:id/revoke', async (req, res) => {
+  router.patch('/admin/keys/:id/revoke', requireAdmin, async (req, res) => {
     try {
       const revoked = await revokeApiKey(db, req.params.id);
 
@@ -208,7 +274,7 @@ export function createRouter(db: Pool) {
   });
 
   // Delete an API key permanently
-  router.delete('/admin/keys/:id', async (req, res) => {
+  router.delete('/admin/keys/:id', requireAdmin, async (req, res) => {
     try {
       const deleted = await deleteApiKey(db, req.params.id);
 

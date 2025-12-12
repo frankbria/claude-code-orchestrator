@@ -1,6 +1,7 @@
 // src/middleware/auth.ts
 import { Request, Response, NextFunction } from 'express';
 import { Pool } from 'pg';
+import crypto from 'crypto';
 import { validateApiKey, ApiKey } from '../db/queries';
 
 // Extend Express Request to include apiKey
@@ -20,11 +21,16 @@ export function createApiKeyAuth(db: Pool) {
   return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     const apiKey = req.headers['x-api-key'];
 
-    if (!apiKey || typeof apiKey !== 'string') {
+    // Unified error response to prevent timing attacks
+    const unauthorizedResponse = () => {
       res.status(401).json({
-        error: 'API key required',
-        code: 'MISSING_API_KEY'
+        error: 'Invalid or missing API key',
+        code: 'INVALID_API_KEY'
       });
+    };
+
+    if (!apiKey || typeof apiKey !== 'string') {
+      unauthorizedResponse();
       return;
     }
 
@@ -32,10 +38,7 @@ export function createApiKeyAuth(db: Pool) {
       const keyRecord = await validateApiKey(db, apiKey);
 
       if (!keyRecord) {
-        res.status(401).json({
-          error: 'Invalid API key',
-          code: 'INVALID_API_KEY'
-        });
+        unauthorizedResponse();
         return;
       }
 
@@ -62,13 +65,14 @@ export function createHookAuth() {
 
     // If no hook secret is configured, allow all requests (development mode)
     if (!hookSecret) {
+      console.warn('CLAUDE_HOOK_SECRET not set - hook endpoints are unauthenticated. Set this in production!');
       next();
       return;
     }
 
     const providedSecret = req.headers['x-hook-secret'];
 
-    if (!providedSecret || providedSecret !== hookSecret) {
+    if (!providedSecret || typeof providedSecret !== 'string') {
       res.status(401).json({
         error: 'Invalid hook secret',
         code: 'INVALID_HOOK_SECRET'
@@ -76,6 +80,34 @@ export function createHookAuth() {
       return;
     }
 
-    next();
+    // Use constant-time comparison to prevent timing attacks
+    try {
+      const providedBuffer = Buffer.from(providedSecret);
+      const secretBuffer = Buffer.from(hookSecret);
+      
+      // Ensure buffers are same length to use timingSafeEqual
+      if (providedBuffer.length !== secretBuffer.length) {
+        res.status(401).json({
+          error: 'Invalid hook secret',
+          code: 'INVALID_HOOK_SECRET'
+        });
+        return;
+      }
+
+      if (!crypto.timingSafeEqual(providedBuffer, secretBuffer)) {
+        res.status(401).json({
+          error: 'Invalid hook secret',
+          code: 'INVALID_HOOK_SECRET'
+        });
+        return;
+      }
+
+      next();
+    } catch (error) {
+      res.status(401).json({
+        error: 'Invalid hook secret',
+        code: 'INVALID_HOOK_SECRET'
+      });
+    }
   };
 }

@@ -95,14 +95,12 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for detailed architecture documentation.
 
 5. **Generate an API key**
 
-   After starting the server, create your first API key:
+   Use the CLI script to create your first admin API key (required for bootstrap):
    ```bash
-   curl -X POST http://localhost:3001/api/admin/keys \
-     -H 'Content-Type: application/json' \
-     -d '{"name": "Initial Admin Key"}'
+   npx tsx scripts/create-admin-key.ts "My Admin Key"
    ```
 
-   Save the returned key securely - it won't be shown again.
+   Save the returned key securely - it won't be shown again. All subsequent keys can be created via the API using this admin key.
 
 6. **Configure Claude Code hooks**
 
