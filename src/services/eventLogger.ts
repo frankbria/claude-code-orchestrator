@@ -34,13 +34,13 @@ export type HookEvent = ToolCompleteEvent | NotificationEvent;
 
 /**
  * Failed event entry with error details
+ * Matches the format used by bash hooks and RetryDaemon for compatibility
  */
 export interface FailedEventEntry {
   event: HookEvent;
-  attempts: number;
+  error: string;
   lastAttempt: string;
-  lastError: string;
-  nextRetry: string;
+  attempts: number;
 }
 
 /**
@@ -60,8 +60,8 @@ export class EventLogger {
   constructor(logDir?: string) {
     this.logDir = logDir || process.env.EVENT_LOG_DIR || '/var/log/claude-orchestrator/events';
     this.eventsLogPath = path.join(this.logDir, 'events.log');
-    this.failedLogPath = path.join(this.logDir, 'failed-events.json');
-    this.deadLetterPath = path.join(this.logDir, 'dead-letter.json');
+    this.failedLogPath = path.join(this.logDir, 'failed-events.ndjson');
+    this.deadLetterPath = path.join(this.logDir, 'dead-letter.ndjson');
     this.lockFile = path.join(this.logDir, '.lock');
 
     this.ensureLogDirectory();
@@ -111,7 +111,7 @@ export class EventLogger {
   }
 
   /**
-   * Add a failed event to the failed events queue
+   * Add a failed event to the failed events queue (NDJSON format)
    */
   async writeFailedEvent(
     event: HookEvent,
@@ -120,18 +120,13 @@ export class EventLogger {
   ): Promise<void> {
     try {
       const failedEvents = await this.readFailedEvents();
-
-      // Calculate next retry time with exponential backoff
-      // Base: 30 seconds, max: 1 hour
-      const backoffMs = Math.min(30000 * Math.pow(2, attempts - 1), 3600000);
-      const nextRetry = new Date(Date.now() + backoffMs).toISOString();
+      const now = new Date().toISOString();
 
       const entry: FailedEventEntry = {
         event,
-        attempts,
-        lastAttempt: new Date().toISOString(),
-        lastError: error,
-        nextRetry
+        error,
+        lastAttempt: now,
+        attempts
       };
 
       // Check if event already exists in failed queue
@@ -150,7 +145,6 @@ export class EventLogger {
       logger.warn('Event added to failed queue', {
         eventId: event.eventId,
         attempts,
-        nextRetry,
         error
       });
     } catch (writeError) {
@@ -162,7 +156,7 @@ export class EventLogger {
   }
 
   /**
-   * Read all failed events from the queue
+   * Read all failed events from the queue (NDJSON format)
    */
   async readFailedEvents(): Promise<FailedEventEntry[]> {
     try {
@@ -171,14 +165,22 @@ export class EventLogger {
       }
 
       const content = await fs.promises.readFile(this.failedLogPath, 'utf-8');
-      const parsed = JSON.parse(content);
+      const lines = content.trim().split('\n').filter(line => line.trim());
+      const events: FailedEventEntry[] = [];
 
-      if (!Array.isArray(parsed)) {
-        logger.warn('Invalid failed events file format, resetting');
-        return [];
+      for (const line of lines) {
+        try {
+          const entry = JSON.parse(line);
+          if (entry && entry.event && entry.event.eventId) {
+            events.push(entry);
+          }
+        } catch {
+          // Skip malformed lines
+          logger.warn('Skipping malformed line in failed events file');
+        }
       }
 
-      return parsed;
+      return events;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
         return [];
@@ -192,13 +194,27 @@ export class EventLogger {
   }
 
   /**
-   * Get events ready for retry (past their nextRetry time)
+   * Calculate backoff time in milliseconds for a given attempt count
+   * Base: 30 seconds, max: 1 hour
+   */
+  private calculateBackoff(attempts: number): number {
+    const baseMs = 30000; // 30 seconds
+    const maxMs = 3600000; // 1 hour
+    return Math.min(baseMs * Math.pow(2, attempts - 1), maxMs);
+  }
+
+  /**
+   * Get events ready for retry (past their backoff time)
    */
   async getEventsReadyForRetry(): Promise<FailedEventEntry[]> {
     const failedEvents = await this.readFailedEvents();
     const now = new Date();
 
-    return failedEvents.filter(entry => new Date(entry.nextRetry) <= now);
+    return failedEvents.filter(entry => {
+      const backoffMs = this.calculateBackoff(entry.attempts);
+      const nextRetryTime = new Date(new Date(entry.lastAttempt).getTime() + backoffMs);
+      return nextRetryTime <= now;
+    });
   }
 
   /**
@@ -222,35 +238,18 @@ export class EventLogger {
   }
 
   /**
-   * Move an event to the dead letter queue after max retries
+   * Move an event to the dead letter queue after max retries (NDJSON format)
    */
   async moveToDeadLetter(entry: FailedEventEntry): Promise<void> {
     try {
-      // Read existing dead letter entries
-      let deadLetterEntries: FailedEventEntry[] = [];
-      try {
-        if (fs.existsSync(this.deadLetterPath)) {
-          const content = await fs.promises.readFile(this.deadLetterPath, 'utf-8');
-          deadLetterEntries = JSON.parse(content);
-        }
-      } catch {
-        deadLetterEntries = [];
-      }
-
-      // Add to dead letter queue
-      deadLetterEntries.push({
+      // Create dead letter entry with timestamp
+      const deadLetterEntry = JSON.stringify({
         ...entry,
-        lastAttempt: new Date().toISOString()
-      });
+        movedToDeadLetter: new Date().toISOString()
+      }) + '\n';
 
-      // Write atomically
-      const tempPath = this.deadLetterPath + '.tmp';
-      await fs.promises.writeFile(
-        tempPath,
-        JSON.stringify(deadLetterEntries, null, 2),
-        { mode: 0o640 }
-      );
-      await fs.promises.rename(tempPath, this.deadLetterPath);
+      // Append to dead letter queue (NDJSON)
+      await fs.promises.appendFile(this.deadLetterPath, deadLetterEntry, { mode: 0o640 });
 
       // Remove from failed queue
       await this.removeFailedEvent(entry.event.eventId);
@@ -258,7 +257,7 @@ export class EventLogger {
       logger.error('Event moved to dead letter queue', {
         eventId: entry.event.eventId,
         attempts: entry.attempts,
-        lastError: entry.lastError
+        error: entry.error
       });
     } catch (error) {
       logger.error('Failed to move event to dead letter queue', {
@@ -269,17 +268,16 @@ export class EventLogger {
   }
 
   /**
-   * Write failed events file atomically using temp file + rename
+   * Write failed events file atomically using temp file + rename (NDJSON format)
    */
   private async writeFailedEventsAtomic(events: FailedEventEntry[]): Promise<void> {
     const tempPath = this.failedLogPath + '.tmp';
 
-    await fs.promises.writeFile(
-      tempPath,
-      JSON.stringify(events, null, 2),
-      { mode: 0o640 }
-    );
+    const content = events.length > 0
+      ? events.map(e => JSON.stringify(e)).join('\n') + '\n'
+      : '';
 
+    await fs.promises.writeFile(tempPath, content, { mode: 0o640 });
     await fs.promises.rename(tempPath, this.failedLogPath);
   }
 
@@ -297,8 +295,8 @@ export class EventLogger {
     try {
       if (fs.existsSync(this.deadLetterPath)) {
         const content = await fs.promises.readFile(this.deadLetterPath, 'utf-8');
-        const deadLetterEntries = JSON.parse(content);
-        deadLetterCount = deadLetterEntries.length;
+        // Count non-empty lines in NDJSON
+        deadLetterCount = content.trim().split('\n').filter(l => l.trim()).length;
       }
     } catch {
       deadLetterCount = 0;
