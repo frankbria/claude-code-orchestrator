@@ -248,17 +248,18 @@ describe('WorkspaceManager Quota Checks', () => {
     // Create some test workspaces
     const ws1 = path.join(TEST_WORKSPACE_BASE, 'gh-test-1');
     const ws2 = path.join(TEST_WORKSPACE_BASE, 'wt-test-2');
-    const notWs = path.join(TEST_WORKSPACE_BASE, 'not-a-workspace');
+    const inClaudeWorkspaces = path.join(TEST_WORKSPACE_BASE, 'other-dir');
 
     await fs.mkdir(ws1, { recursive: true });
     await fs.mkdir(ws2, { recursive: true });
-    await fs.mkdir(notWs, { recursive: true });
+    await fs.mkdir(inClaudeWorkspaces, { recursive: true });
 
-    createdWorkspaces.push(ws1, ws2, notWs);
+    createdWorkspaces.push(ws1, ws2, inClaudeWorkspaces);
 
     const quotaInfo = await workspaceManager.countWorkspaces('test-request');
 
-    expect(quotaInfo.count).toBe(2); // Only gh- and wt- prefixed
+    // Counts: gh- prefixed, wt- prefixed, and dirs within claude-workspaces path
+    expect(quotaInfo.count).toBe(3);
     expect(quotaInfo.quota).toBeGreaterThan(0);
     expect(quotaInfo.exceeded).toBe(false);
   });

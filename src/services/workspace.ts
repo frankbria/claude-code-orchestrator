@@ -105,6 +105,34 @@ export class WorkspaceManager {
   }
 
   /**
+   * Check if a directory matches workspace patterns
+   *
+   * Used by both countWorkspaces() and cleanup() to ensure consistent
+   * workspace identification. A directory is considered a workspace if:
+   * - Its name starts with 'gh-' (GitHub clone)
+   * - Its name starts with 'wt-' (git worktree)
+   * - Its full path contains 'claude-workspaces'
+   *
+   * @private
+   * @param {string} name - Directory basename
+   * @param {string} [fullPath] - Optional full path for additional checks
+   * @returns {boolean} True if directory matches workspace patterns
+   */
+  private isWorkspaceDirectory(name: string, fullPath?: string): boolean {
+    // Check name-based patterns (gh- for GitHub clones, wt- for worktrees)
+    if (name.startsWith('gh-') || name.startsWith('wt-')) {
+      return true;
+    }
+
+    // Check if path is within claude-workspaces directory
+    if (fullPath && fullPath.includes('claude-workspaces')) {
+      return true;
+    }
+
+    return false;
+  }
+
+  /**
    * Check available disk space for the workspace directory
    *
    * Uses the `df` command to query disk space information for the
@@ -203,7 +231,8 @@ export class WorkspaceManager {
       // Count directories that match workspace patterns
       const workspaces = entries.filter(entry => {
         if (!entry.isDirectory()) return false;
-        return entry.name.startsWith('gh-') || entry.name.startsWith('wt-');
+        const fullPath = path.join(this.baseDir, entry.name);
+        return this.isWorkspaceDirectory(entry.name, fullPath);
       });
 
       const quotaInfo: WorkspaceQuotaInfo = {
@@ -718,11 +747,8 @@ export class WorkspaceManager {
 
     // Additional safety check: ensure it's actually a workspace directory
     const basename = path.basename(validatedPath);
-    const isWorkspaceDir = basename.startsWith('gh-') ||
-                           basename.startsWith('wt-') ||
-                           validatedPath.includes('claude-workspaces');
 
-    if (!isWorkspaceDir) {
+    if (!this.isWorkspaceDirectory(basename, validatedPath)) {
       securityLogger.error('Attempted to delete non-workspace directory', {
         requestId,
         timestamp: new Date().toISOString(),
