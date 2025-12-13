@@ -1511,7 +1511,7 @@ If either check fails, workspace creation is rejected with an appropriate error 
 
 ### Health Check Integration
 
-The `/health` endpoint reports workspace and disk space status:
+The `/health` endpoint reports workspace, disk space, and archival capability status:
 
 ```json
 {
@@ -1536,6 +1536,11 @@ The `/health` endpoint reports workspace and disk space status:
       "count": 23,
       "quota": 100,
       "status": "ok"
+    },
+    "archival": {
+      "enabled": true,
+      "tarAvailable": true,
+      "status": "ok"
     }
   }
 }
@@ -1548,6 +1553,13 @@ When `ARCHIVE_WORKSPACES=true`, workspaces are archived as tar.gz files before d
 1. Archive filename format: `{workspace-basename}-{timestamp}.tar.gz`
 2. Archives are stored in `ARCHIVE_DIR`
 3. Archive directory is created automatically with mode 0750
+
+**System Requirement:** The `tar` command must be available in PATH when archival is enabled.
+
+- At startup, the system validates tar availability via pre-flight check
+- If tar is unavailable, archival is automatically disabled with a warning log
+- The `/health` endpoint reports archival capability status
+- Install tar: `apt-get install tar` (Debian/Ubuntu), `apk add tar` (Alpine), pre-installed on macOS
 
 ### Troubleshooting Cleanup
 

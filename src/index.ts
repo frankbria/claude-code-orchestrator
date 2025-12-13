@@ -7,7 +7,7 @@ import { createApiKeyAuth, createHookAuth } from './middleware/auth';
 import { startRetryDaemon, stopRetryDaemon, getRetryDaemon } from './services/retryDaemon';
 import { startCleanupJob, stopCleanupJob, getCleanupJob } from './services/cleanup-job';
 import { WorkspaceManager } from './services/workspace';
-import { getCleanupConfig, validateCleanupConfig } from './config/cleanup';
+import { getCleanupConfig, validateCleanupConfig, isTarAvailable } from './config/cleanup';
 import { createLogger } from './utils/logger';
 
 // Load environment variables
@@ -80,6 +80,15 @@ app.get('/health', async (req, res) => {
       }
     }
 
+    // Determine archival capability status
+    const archivalStatus = {
+      enabled: cleanupConfig.archiveWorkspaces,
+      tarAvailable: isTarAvailable(),
+      status: cleanupConfig.archiveWorkspaces
+        ? (isTarAvailable() ? 'ok' : 'degraded')
+        : 'disabled',
+    };
+
     // Determine overall health status
     const hasWarnings = diskStatus?.status === 'warning' || workspaceStatus?.status === 'warning';
     const overallStatus = hasWarnings ? 'warning' : 'ok';
@@ -103,6 +112,7 @@ app.get('/health', async (req, res) => {
         } : 'not initialized',
         disk: diskStatus,
         workspaces: workspaceStatus,
+        archival: archivalStatus,
       }
     });
   } catch (error) {

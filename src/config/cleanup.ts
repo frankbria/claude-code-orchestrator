@@ -6,9 +6,13 @@
  * - Workspace archival settings
  * - Scheduled cleanup job parameters
  *
+ * System Requirements:
+ * - When ARCHIVE_WORKSPACES=true, the `tar` command must be available in PATH
+ *
  * @module config/cleanup
  */
 
+import { execFileSync } from 'child_process';
 import { createLogger } from '../utils/logger';
 
 const logger = createLogger('config');
@@ -156,7 +160,55 @@ export function loadCleanupConfig(): CleanupConfig {
 }
 
 /**
+ * Check if the tar command is available in PATH
+ *
+ * @returns true if tar is available, false otherwise
+ */
+export function checkTarAvailability(): boolean {
+  try {
+    execFileSync('tar', ['--version'], {
+      encoding: 'utf8',
+      timeout: 5000,
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Cache tar availability check result
+let tarAvailable: boolean | null = null;
+
+/**
+ * Get cached tar availability status
+ *
+ * @returns true if tar is available, false otherwise
+ */
+export function isTarAvailable(): boolean {
+  if (tarAvailable === null) {
+    tarAvailable = checkTarAvailability();
+  }
+  return tarAvailable;
+}
+
+/**
+ * Reset tar availability cache (for testing)
+ */
+export function resetTarAvailabilityCache(): void {
+  tarAvailable = null;
+}
+
+/**
  * Validate cleanup configuration and log warnings
+ *
+ * Performs pre-flight checks including:
+ * - Workspace base directory is configured
+ * - Archive directory is set when archival is enabled
+ * - tar command is available when archival is enabled
+ *
+ * If tar is unavailable but archival is enabled, archival is automatically
+ * disabled with a warning rather than failing at runtime.
  *
  * @param config The configuration to validate
  * @returns true if valid, false if there are critical errors
@@ -174,6 +226,21 @@ export function validateCleanupConfig(config: CleanupConfig): boolean {
   if (config.archiveWorkspaces && !config.archiveDir) {
     logger.error('ARCHIVE_DIR is required when ARCHIVE_WORKSPACES is enabled');
     isValid = false;
+  }
+
+  // Pre-flight check: validate tar availability when archival is enabled
+  if (config.archiveWorkspaces) {
+    const tarIsAvailable = isTarAvailable();
+    if (!tarIsAvailable) {
+      logger.warn(
+        'tar command not found in PATH - workspace archival will be disabled. ' +
+        'Install tar to enable archival when ARCHIVE_WORKSPACES=true'
+      );
+      // Gracefully disable archival instead of failing at runtime
+      config.archiveWorkspaces = false;
+    } else {
+      logger.info('tar command available - workspace archival enabled');
+    }
   }
 
   // Validate cron expression format (basic check)
