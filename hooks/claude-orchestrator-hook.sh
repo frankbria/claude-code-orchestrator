@@ -102,6 +102,19 @@ main() {
     local truncated_result
     truncated_result=$(truncate_result "${TOOL_RESULT:-}" "$MAX_RESULT_SIZE")
 
+    # Normalize TOOL_INPUT: ensure it's valid JSON or null
+    # The ${var:-default} only substitutes for unset/null, not empty string
+    local input_json="null"
+    if [ -n "${TOOL_INPUT:-}" ]; then
+        # TOOL_INPUT is set and non-empty, validate it's valid JSON
+        if echo "$TOOL_INPUT" | jq -e . >/dev/null 2>&1; then
+            input_json="$TOOL_INPUT"
+        else
+            # Not valid JSON, treat as null
+            input_json="null"
+        fi
+    fi
+
     # Build event JSON payload
     local event_json
     event_json=$(jq -n -c \
@@ -110,7 +123,7 @@ main() {
         --arg tool "${TOOL_NAME:-unknown}" \
         --arg result "$truncated_result" \
         --arg timestamp "$timestamp" \
-        --argjson input "${TOOL_INPUT:-null}" \
+        --argjson input "$input_json" \
         '{
             eventId: $eventId,
             eventType: "tool-complete",
