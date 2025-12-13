@@ -13,7 +13,7 @@
 # - Enforces 85% minimum code coverage
 # - Uploads coverage reports as artifacts
 # - Fails build if any security test fails
-# - Tests on multiple Node.js versions (16, 18, 20)
+# - Tests on multiple Node.js versions (18, 20)
 # - Caches dependencies for faster runs
 
 name: Security Tests
@@ -49,17 +49,17 @@ jobs:
       - name: Run security tests
         run: npm run test:security
         env:
-          # Set test environment to use /tmp for workspaces
+          # Use allowlisted workspace path (matches /tmp/claude-workspaces/.+ pattern)
           CI: true
-          WORKSPACE_BASE: /tmp/test-workspaces
-          LOG_DIR: /tmp/test-logs
+          WORKSPACE_BASE: /tmp/claude-workspaces/ci
+          LOG_DIR: /tmp/claude-orchestrator-logs
 
       - name: Run security tests with coverage
         run: npm run test:coverage -- src/__tests__/security
         env:
           CI: true
-          WORKSPACE_BASE: /tmp/test-workspaces
-          LOG_DIR: /tmp/test-logs
+          WORKSPACE_BASE: /tmp/claude-workspaces/ci
+          LOG_DIR: /tmp/claude-orchestrator-logs
 
       - name: Check coverage thresholds
         run: npm run test:coverage -- --coverageThreshold='{"global":{"branches":85,"functions":85,"lines":85,"statements":85}}'
