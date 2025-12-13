@@ -336,7 +336,13 @@ CREATE TABLE command_logs (
     result TEXT,                         -- Tool output/result
     status VARCHAR(20) DEFAULT 'completed',
     duration_ms INTEGER,
-    timestamp TIMESTAMP DEFAULT NOW()
+    timestamp TIMESTAMP DEFAULT NOW(),
+    -- Event delivery tracking (for reliable hook processing)
+    event_id UUID UNIQUE,                -- Unique event ID for idempotency
+    delivery_status VARCHAR(20) DEFAULT 'delivered',  -- 'pending', 'delivered', 'failed', 'dead_letter'
+    delivery_attempts INTEGER DEFAULT 1,
+    last_delivery_attempt TIMESTAMP DEFAULT NOW(),
+    delivery_error TEXT
 );
 
 -- Slack Thread Mapping: Link Slack threads to sessions
@@ -699,9 +705,119 @@ Claude Code provides these environment variables to hooks:
 | `TOOL_INPUT` | JSON string of tool input parameters |
 | `MESSAGE` | Notification message (for notification hooks) |
 
-### Hook Script Example
+### Reliable Hook Scripts
 
-For complex hook logic, use a script:
+The orchestrator provides hook scripts with built-in reliability features:
+
+**Location:** `hooks/claude-orchestrator-hook.sh` and `hooks/claude-orchestrator-notify.sh`
+
+**Features:**
+- **UUID-based event IDs** for idempotency (prevents duplicate processing)
+- **Local event logging** before HTTP delivery (ensures no data loss)
+- **Automatic retry queue** for failed deliveries
+- **Graceful degradation** - always exits 0 to not block Claude Code
+
+**Configuration:**
+
+```json
+{
+  "hooks": {
+    "postToolUse": [
+      {
+        "matcher": "*",
+        "command": "/path/to/hooks/claude-orchestrator-hook.sh"
+      }
+    ],
+    "notification": [
+      {
+        "command": "/path/to/hooks/claude-orchestrator-notify.sh"
+      }
+    ]
+  }
+}
+```
+
+**Environment Variables for Hook Scripts:**
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `CLAUDE_ORCHESTRATOR_API` | API base URL | `http://localhost:3001` |
+| `CLAUDE_ORCHESTRATOR_LOGS` | Event log directory | `/var/log/claude-orchestrator/events` |
+| `CLAUDE_HOOK_SECRET` | Shared secret for auth | (none) |
+| `HOOK_TIMEOUT` | HTTP timeout in seconds | `5` |
+
+### Event Delivery Flow
+
+```
+┌─────────────┐     ┌─────────────┐     ┌─────────────┐     ┌─────────────┐
+│ Claude Code │────▶│ Hook Script │────▶│ Local Log   │────▶│ HTTP POST   │
+└─────────────┘     └─────────────┘     └─────────────┘     └──────┬──────┘
+                                                                   │
+                    ┌──────────────────────────────────────────────┘
+                    │
+              ┌─────▼─────┐
+              │  Success? │
+              └─────┬─────┘
+                    │
+         ┌──────────┴──────────┐
+         │                     │
+    ┌────▼────┐          ┌─────▼─────┐
+    │   Yes   │          │    No     │
+    │ (done)  │          │ (retry)   │
+    └─────────┘          └─────┬─────┘
+                               │
+                    ┌──────────▼──────────┐
+                    │ Write to failed     │
+                    │ events queue        │
+                    └──────────┬──────────┘
+                               │
+                    ┌──────────▼──────────┐
+                    │ Retry Daemon        │
+                    │ (30s interval)      │
+                    └─────────────────────┘
+```
+
+### Idempotency
+
+Each event includes a unique `eventId` (UUID). The API checks for duplicates before inserting:
+
+1. **Check phase:** SELECT to see if event_id exists
+2. **Insert phase:** INSERT with event_id
+3. **Constraint check:** UNIQUE constraint on event_id prevents race conditions
+
+Duplicate events receive a `200 OK` response with `status: "duplicate"`.
+
+### Retry Daemon
+
+The background retry daemon automatically redelivers failed events:
+
+- **Interval:** Configurable (default 30 seconds)
+- **Backoff:** Exponential (30s, 60s, 120s, ... up to 1 hour)
+- **Max attempts:** Configurable (default 10)
+- **Dead letter:** Events exceeding max attempts move to dead letter queue
+
+**Monitoring:**
+
+```bash
+# Check retry daemon status
+curl http://localhost:3001/health
+
+# Response includes:
+{
+  "status": "ok",
+  "components": {
+    "retryDaemon": {
+      "running": true,
+      "pendingRetries": 3,
+      "deadLetterCount": 0
+    }
+  }
+}
+```
+
+### Legacy Hook Script Example
+
+For simple setups without reliability features:
 
 ```bash
 #!/bin/bash
@@ -1476,6 +1592,60 @@ async cloneGitHubRepo(repo: string): Promise<string> {
 2. Verify environment variables are set
 3. Test API endpoints manually
 4. Ensure Claude Code is installed in n8n container
+
+### Failed Event Delivery
+
+1. Check the retry daemon is running:
+   ```bash
+   curl http://localhost:3001/health
+   ```
+
+2. Check for pending retries:
+   ```bash
+   cat /var/log/claude-orchestrator/events/failed-events.ndjson
+   ```
+
+3. Check dead letter queue for events that exceeded max retries:
+   ```bash
+   cat /var/log/claude-orchestrator/events/dead-letter.ndjson
+   ```
+
+4. Verify event log directory permissions:
+   ```bash
+   ls -la /var/log/claude-orchestrator/events/
+   # Should be writable by both hook scripts and API server
+   ```
+
+5. Test hook delivery manually:
+   ```bash
+   # With event ID for idempotency
+   curl -X POST http://localhost:3001/api/hooks/tool-complete \
+     -H "Content-Type: application/json" \
+     -d '{"eventId":"550e8400-e29b-41d4-a716-446655440000","session":"test","tool":"bash","result":"ok"}'
+   ```
+
+6. Check database for delivery statistics:
+   ```sql
+   SELECT delivery_status, COUNT(*)
+   FROM command_logs
+   WHERE event_id IS NOT NULL
+   GROUP BY delivery_status;
+   ```
+
+### Recovering Dead Letter Events
+
+Dead letter events can be manually reprocessed:
+
+```bash
+# Read dead letter events
+cat /var/log/claude-orchestrator/events/dead-letter.ndjson | jq .
+
+# Manually retry a specific event
+cat dead-letter.ndjson | jq -r 'select(.event.eventId == "your-event-id") | .event' | \
+  curl -X POST http://localhost:3001/api/hooks/tool-complete \
+    -H "Content-Type: application/json" \
+    -d @-
+```
 
 ---
 
