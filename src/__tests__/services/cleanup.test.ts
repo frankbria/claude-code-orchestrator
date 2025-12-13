@@ -38,6 +38,27 @@ class MockPool {
   }
 
   async query(text: string, values?: any[]): Promise<any> {
+    return this._executeQuery(text, values);
+  }
+
+  // Return a mock client for transaction support
+  async connect(): Promise<any> {
+    const pool = this;
+    return {
+      async query(text: string, values?: any[]): Promise<any> {
+        // Handle transaction commands
+        if (text === 'BEGIN' || text === 'COMMIT' || text === 'ROLLBACK') {
+          return { rows: [] };
+        }
+        return pool._executeQuery(text, values);
+      },
+      release(): void {
+        // No-op for mock
+      },
+    };
+  }
+
+  private _executeQuery(text: string, values?: any[]): any {
     // Mock SELECT sessions for cleanup
     if (text.includes('SELECT') && text.includes('FROM sessions') && text.includes('status IN')) {
       return { rows: this.mockData.sessions.filter(s =>

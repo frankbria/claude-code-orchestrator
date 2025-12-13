@@ -419,29 +419,27 @@ export async function getStaleSessionsForCleanup(
 /**
  * Delete a session record after cleanup
  *
- * Also deletes associated messages and command logs (via CASCADE or manual)
+ * Also deletes associated messages and command logs within a transaction
+ * to prevent partial deletes if any statement fails mid-way.
  */
 export async function deleteSession(
   db: Pool,
   id: string
 ): Promise<boolean> {
-  // Delete related records first if not using CASCADE
-  await db.query(
-    `DELETE FROM session_messages WHERE session_id = $1`,
-    [id]
-  );
-
-  await db.query(
-    `DELETE FROM command_logs WHERE session_id = $1`,
-    [id]
-  );
-
-  const result = await db.query(
-    `DELETE FROM sessions WHERE id = $1 RETURNING id`,
-    [id]
-  );
-
-  return result.rows.length > 0;
+  const client = await db.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query(`DELETE FROM session_messages WHERE session_id = $1`, [id]);
+    await client.query(`DELETE FROM command_logs WHERE session_id = $1`, [id]);
+    const result = await client.query(`DELETE FROM sessions WHERE id = $1 RETURNING id`, [id]);
+    await client.query('COMMIT');
+    return result.rows.length > 0;
+  } catch (e) {
+    await client.query('ROLLBACK');
+    throw e;
+  } finally {
+    client.release();
+  }
 }
 
 /**
