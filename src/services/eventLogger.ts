@@ -5,6 +5,11 @@ import { createLogger } from '../utils/logger';
 
 const logger = createLogger('event-logger');
 
+// Lock timeout in milliseconds (5 seconds)
+const LOCK_TIMEOUT_MS = 5000;
+// Lock retry interval in milliseconds
+const LOCK_RETRY_MS = 50;
+
 /**
  * Event structure for tool completion hooks
  */
@@ -84,6 +89,69 @@ export class EventLogger {
   }
 
   /**
+   * Acquire an exclusive file lock for read-modify-write operations.
+   * Uses exclusive file creation ('wx' flag) to ensure atomicity.
+   * Returns a release function that must be called when done.
+   */
+  private async acquireLock(): Promise<() => Promise<void>> {
+    const startTime = Date.now();
+
+    while (Date.now() - startTime < LOCK_TIMEOUT_MS) {
+      try {
+        // Try to create lock file exclusively
+        const fd = await fs.promises.open(this.lockFile, 'wx');
+
+        // Lock acquired - return release function
+        return async () => {
+          try {
+            await fd.close();
+            await fs.promises.unlink(this.lockFile);
+          } catch (error) {
+            logger.warn('Failed to release lock file', {
+              error: error instanceof Error ? error.message : String(error)
+            });
+          }
+        };
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
+          // Lock file exists, check if it's stale (older than timeout)
+          try {
+            const stats = await fs.promises.stat(this.lockFile);
+            const lockAge = Date.now() - stats.mtimeMs;
+            if (lockAge > LOCK_TIMEOUT_MS) {
+              // Stale lock, remove it and retry
+              logger.warn('Removing stale lock file', { lockAge });
+              await fs.promises.unlink(this.lockFile);
+              continue;
+            }
+          } catch {
+            // Lock file might have been removed, retry
+          }
+          // Wait and retry
+          await new Promise(resolve => setTimeout(resolve, LOCK_RETRY_MS));
+        } else {
+          throw error;
+        }
+      }
+    }
+
+    throw new Error(`Failed to acquire lock within ${LOCK_TIMEOUT_MS}ms`);
+  }
+
+  /**
+   * Execute a function while holding the file lock.
+   * Ensures lock is released even if the function throws.
+   */
+  private async withLock<T>(fn: () => Promise<T>): Promise<T> {
+    const releaseLock = await this.acquireLock();
+    try {
+      return await fn();
+    } finally {
+      await releaseLock();
+    }
+  }
+
+  /**
    * Write an event to the events log (append-only)
    * This is called before attempting HTTP delivery
    */
@@ -112,6 +180,7 @@ export class EventLogger {
 
   /**
    * Add a failed event to the failed events queue (NDJSON format)
+   * Uses file locking to prevent race conditions in read-modify-write.
    */
   async writeFailedEvent(
     event: HookEvent,
@@ -119,28 +188,30 @@ export class EventLogger {
     attempts: number = 1
   ): Promise<void> {
     try {
-      const failedEvents = await this.readFailedEvents();
-      const now = new Date().toISOString();
+      await this.withLock(async () => {
+        const failedEvents = await this.readFailedEvents();
+        const now = new Date().toISOString();
 
-      const entry: FailedEventEntry = {
-        event,
-        error,
-        lastAttempt: now,
-        attempts
-      };
+        const entry: FailedEventEntry = {
+          event,
+          error,
+          lastAttempt: now,
+          attempts
+        };
 
-      // Check if event already exists in failed queue
-      const existingIndex = failedEvents.findIndex(
-        e => e.event.eventId === event.eventId
-      );
+        // Check if event already exists in failed queue
+        const existingIndex = failedEvents.findIndex(
+          e => e.event.eventId === event.eventId
+        );
 
-      if (existingIndex >= 0) {
-        failedEvents[existingIndex] = entry;
-      } else {
-        failedEvents.push(entry);
-      }
+        if (existingIndex >= 0) {
+          failedEvents[existingIndex] = entry;
+        } else {
+          failedEvents.push(entry);
+        }
 
-      await this.writeFailedEventsAtomic(failedEvents);
+        await this.writeFailedEventsAtomic(failedEvents);
+      });
 
       logger.warn('Event added to failed queue', {
         eventId: event.eventId,
@@ -218,15 +289,31 @@ export class EventLogger {
   }
 
   /**
-   * Remove a successfully delivered event from the failed queue
+   * Internal method to remove event from failed queue without acquiring lock.
+   * Caller must hold the lock.
+   */
+  private async removeFailedEventInternal(eventId: string): Promise<boolean> {
+    const failedEvents = await this.readFailedEvents();
+    const filtered = failedEvents.filter(e => e.event.eventId !== eventId);
+
+    if (filtered.length !== failedEvents.length) {
+      await this.writeFailedEventsAtomic(filtered);
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * Remove a successfully delivered event from the failed queue.
+   * Uses file locking to prevent race conditions in read-modify-write.
    */
   async removeFailedEvent(eventId: string): Promise<void> {
     try {
-      const failedEvents = await this.readFailedEvents();
-      const filtered = failedEvents.filter(e => e.event.eventId !== eventId);
+      const removed = await this.withLock(async () => {
+        return this.removeFailedEventInternal(eventId);
+      });
 
-      if (filtered.length !== failedEvents.length) {
-        await this.writeFailedEventsAtomic(filtered);
+      if (removed) {
         logger.info('Event removed from failed queue', { eventId });
       }
     } catch (error) {
@@ -238,21 +325,24 @@ export class EventLogger {
   }
 
   /**
-   * Move an event to the dead letter queue after max retries (NDJSON format)
+   * Move an event to the dead letter queue after max retries (NDJSON format).
+   * Uses file locking to ensure atomic append + remove operation.
    */
   async moveToDeadLetter(entry: FailedEventEntry): Promise<void> {
     try {
-      // Create dead letter entry with timestamp
-      const deadLetterEntry = JSON.stringify({
-        ...entry,
-        movedToDeadLetter: new Date().toISOString()
-      }) + '\n';
+      await this.withLock(async () => {
+        // Create dead letter entry with timestamp
+        const deadLetterEntry = JSON.stringify({
+          ...entry,
+          movedToDeadLetter: new Date().toISOString()
+        }) + '\n';
 
-      // Append to dead letter queue (NDJSON)
-      await fs.promises.appendFile(this.deadLetterPath, deadLetterEntry, { mode: 0o640 });
+        // Append to dead letter queue (NDJSON)
+        await fs.promises.appendFile(this.deadLetterPath, deadLetterEntry, { mode: 0o640 });
 
-      // Remove from failed queue
-      await this.removeFailedEvent(entry.event.eventId);
+        // Remove from failed queue (using internal method to avoid deadlock)
+        await this.removeFailedEventInternal(entry.event.eventId);
+      });
 
       logger.error('Event moved to dead letter queue', {
         eventId: entry.event.eventId,
