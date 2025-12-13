@@ -352,11 +352,20 @@ export function getCleanupJob(): CleanupJob | null {
 
 /**
  * Run cleanup manually (useful for testing or on-demand cleanup)
+ *
+ * If a singleton CleanupJob exists (from startCleanupJob), reuses it to
+ * prevent concurrent cleanup runs. Otherwise creates a temporary instance.
  */
 export async function runManualCleanup(
   db: Pool,
   workspaceManager?: WorkspaceManager
 ): Promise<CleanupStats> {
+  // Reuse singleton to prevent concurrent cleanup runs
+  if (cleanupJobInstance) {
+    return cleanupJobInstance.runCleanup();
+  }
+
+  // No singleton exists - create temporary instance for one-off cleanup
   const job = new CleanupJob(db, workspaceManager);
   return job.runCleanup();
 }
