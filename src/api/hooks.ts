@@ -166,7 +166,7 @@ export function createHookRouter(db: Pool) {
       }
 
       // Insert the notification
-      await db.query(
+      const insertResult = await db.query(
         `INSERT INTO session_messages (
           session_id, direction, content, source,
           event_id, delivery_status, delivery_attempts, last_delivery_attempt
@@ -175,6 +175,22 @@ export function createHookRouter(db: Pool) {
         FROM sessions WHERE claude_session_id = $1`,
         [session, message, eventId || null]
       );
+
+      // Check if any rows were inserted (session existed)
+      if (insertResult.rowCount === 0) {
+        logger.warn('Notification received for unknown session', {
+          eventId,
+          session,
+          messageLength: message?.length
+        });
+
+        res.status(404).json({
+          status: 'session_not_found',
+          message: 'No session found with the provided claude_session_id',
+          eventId
+        });
+        return;
+      }
 
       logger.info('Notification event recorded', {
         eventId,
