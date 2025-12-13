@@ -201,18 +201,45 @@ async function validateParentDirectories(
 ): Promise<void> {
   const parts = targetPath.split(path.sep);
   let currentPath = '';
+  const isAbsolutePath = targetPath.startsWith(path.sep);
 
   // Walk up the directory tree, checking each level for symlinks
   for (const part of parts) {
     if (!part) continue;
 
-    currentPath = currentPath ? path.join(currentPath, part) : part;
+    // CRITICAL FIX: Preserve leading separator for absolute paths
+    // Without this, /tmp/workspaces/... becomes tmp/workspaces/... (relative)
+    // which would fail realpath() or check wrong directories
+    currentPath = currentPath
+      ? path.join(currentPath, part)
+      : (isAbsolutePath ? path.sep + part : part);
+
+    // IMPORTANT: Only validate directories that are AT or BELOW the baseDir level
+    // Parent directories of baseDir (like /tmp when baseDir is /tmp/workspaces)
+    // are allowed because they're part of the legitimate path structure.
+    // We only need to check directories within the workspace for symlink escapes.
+    const isAtOrBelowBaseDir = currentPath.startsWith(baseDir + path.sep) || currentPath === baseDir;
+    const isParentOfBaseDir = baseDir.startsWith(currentPath + path.sep) || baseDir === currentPath;
+
+    // Skip validation for directories that are parents of baseDir
+    if (!isAtOrBelowBaseDir && isParentOfBaseDir) {
+      continue;
+    }
+
+    // If we've gone past baseDir without entering it, something is wrong
+    if (!isAtOrBelowBaseDir && !isParentOfBaseDir) {
+      securityLogger.warn('Path escapes workspace boundary', {
+        requestId,
+        timestamp: new Date().toISOString(),
+      });
+      throw new Error('Invalid workspace path');
+    }
 
     try {
       const realPath = await fs.realpath(currentPath);
 
-      // Check if this real path is within base directory
-      // Note: baseDir itself is allowed, hence the || realPath !== baseDir check
+      // Check if this real path is within base directory or is baseDir itself
+      // Note: baseDir itself is allowed, hence the || realPath === baseDir check
       if (!realPath.startsWith(baseDir + path.sep) && realPath !== baseDir) {
         securityLogger.warn('Parent directory symlink escape detected', {
           requestId,

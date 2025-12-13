@@ -87,8 +87,23 @@ export async function validateSessionCreate(
   res: Response,
   next: NextFunction
 ): Promise<void> {
-  const { projectType, projectPath, githubRepo, basePath } = req.body;
   const requestId = (req as any).id;
+
+  // Handle null/undefined request body
+  if (!req.body || typeof req.body !== 'object') {
+    securityLogger.warn('Invalid request body', {
+      requestId,
+      timestamp: new Date().toISOString(),
+    });
+
+    res.status(400).json({
+      error: 'Invalid request',
+      details: 'Request body required',
+    });
+    return;
+  }
+
+  const { projectType, projectPath, githubRepo, basePath } = req.body;
 
   // Validate project type against allowlist
   const allowedTypes = ['github', 'local', 'e2b', 'worktree'];
