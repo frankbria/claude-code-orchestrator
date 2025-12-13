@@ -5,6 +5,9 @@ import { createRouter } from './api/routes';
 import { createHookRouter } from './api/hooks';
 import { createApiKeyAuth, createHookAuth } from './middleware/auth';
 import { startRetryDaemon, stopRetryDaemon, getRetryDaemon } from './services/retryDaemon';
+import { startCleanupJob, stopCleanupJob, getCleanupJob } from './services/cleanup-job';
+import { WorkspaceManager } from './services/workspace';
+import { getCleanupConfig, validateCleanupConfig } from './config/cleanup';
 import { createLogger } from './utils/logger';
 
 // Load environment variables
@@ -23,6 +26,19 @@ const db = new Pool({
 const apiKeyAuth = createApiKeyAuth(db);
 const hookAuth = createHookAuth();
 
+// Initialize workspace manager for health checks
+let workspaceManager: WorkspaceManager | null = null;
+try {
+  const cleanupConfig = getCleanupConfig();
+  if (cleanupConfig.workspaceBase) {
+    workspaceManager = new WorkspaceManager(cleanupConfig.workspaceBase);
+  }
+} catch (error) {
+  logger.warn('WorkspaceManager not initialized for health checks', {
+    error: error instanceof Error ? error.message : String(error),
+  });
+}
+
 // Health check endpoint (no auth required)
 app.get('/health', async (req, res) => {
   try {
@@ -33,8 +49,43 @@ app.get('/health', async (req, res) => {
     const daemon = getRetryDaemon();
     const daemonStats = daemon ? await daemon.getStats() : null;
 
+    // Get cleanup job status
+    const cleanupJob = getCleanupJob();
+    const cleanupStats = cleanupJob ? cleanupJob.getStats() : null;
+    const cleanupConfig = getCleanupConfig();
+
+    // Get disk space and workspace count
+    let diskStatus: { availableGB: number; thresholdGB: number; status: string } | null = null;
+    let workspaceStatus: { count: number; quota: number; status: string } | null = null;
+
+    if (workspaceManager) {
+      try {
+        const diskInfo = await workspaceManager.checkDiskSpace('health-check');
+        diskStatus = {
+          availableGB: diskInfo.availableGB,
+          thresholdGB: cleanupConfig.minDiskSpaceGB,
+          status: diskInfo.availableGB >= cleanupConfig.minDiskSpaceGB ? 'ok' : 'warning',
+        };
+
+        const quotaInfo = await workspaceManager.countWorkspaces('health-check');
+        workspaceStatus = {
+          count: quotaInfo.count,
+          quota: quotaInfo.quota,
+          status: quotaInfo.exceeded ? 'warning' : 'ok',
+        };
+      } catch (error) {
+        logger.warn('Failed to get workspace health info', {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+
+    // Determine overall health status
+    const hasWarnings = diskStatus?.status === 'warning' || workspaceStatus?.status === 'warning';
+    const overallStatus = hasWarnings ? 'warning' : 'ok';
+
     res.json({
-      status: 'ok',
+      status: overallStatus,
       timestamp: new Date().toISOString(),
       components: {
         database: 'connected',
@@ -42,7 +93,16 @@ app.get('/health', async (req, res) => {
           running: daemonStats.isRunning,
           pendingRetries: daemonStats.pendingRetries,
           deadLetterCount: daemonStats.deadLetterCount
-        } : 'not initialized'
+        } : 'not initialized',
+        cleanupJob: cleanupStats ? {
+          running: cleanupJob?.isCleanupRunning() || false,
+          lastRun: cleanupStats.lastRun,
+          sessionsProcessed: cleanupStats.sessionsProcessed,
+          workspacesDeleted: cleanupStats.workspacesDeleted,
+          errors: cleanupStats.errors,
+        } : 'not initialized',
+        disk: diskStatus,
+        workspaces: workspaceStatus,
       }
     });
   } catch (error) {
@@ -67,6 +127,10 @@ const port = process.env.API_PORT || 3001;
 const server = app.listen(port, () => {
   logger.info(`Claude Orchestrator API running on :${port}`);
 
+  // Validate and log cleanup configuration
+  const cleanupConfig = getCleanupConfig();
+  validateCleanupConfig(cleanupConfig);
+
   // Start the retry daemon if enabled
   const enableRetryDaemon = process.env.ENABLE_RETRY_DAEMON !== 'false';
   if (enableRetryDaemon) {
@@ -81,6 +145,25 @@ const server = app.listen(port, () => {
       // Continue running the server - retry daemon is not critical for basic operation
     }
   }
+
+  // Start the cleanup job if enabled
+  if (cleanupConfig.enableScheduledCleanup) {
+    try {
+      startCleanupJob(db, workspaceManager || undefined);
+      logger.info('Cleanup job started', {
+        cronExpression: cleanupConfig.cleanupCronExpression,
+        cleanupIntervalHours: cleanupConfig.cleanupIntervalHours,
+      });
+    } catch (error) {
+      logger.error('Failed to start cleanup job', {
+        error: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? error.stack : undefined
+      });
+      // Continue running the server - cleanup job is not critical for basic operation
+    }
+  } else {
+    logger.info('Scheduled cleanup job is disabled');
+  }
 });
 
 // Graceful shutdown handling
@@ -89,6 +172,9 @@ const shutdown = async (signal: string) => {
 
   // Stop the retry daemon
   stopRetryDaemon();
+
+  // Stop the cleanup job
+  stopCleanupJob();
 
   // Close the server
   server.close(() => {
