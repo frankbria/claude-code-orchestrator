@@ -406,7 +406,8 @@ export async function getStaleSessionsForCleanup(
     `SELECT id, project_path, status, updated_at
      FROM sessions
      WHERE status IN ('completed', 'error', 'stale')
-     AND updated_at < NOW() - INTERVAL '1 hour' * $1
+     AND updated_at < NOW() - make_interval(hours => $1::int)
+     AND (metadata->>'cleaned_at' IS NULL)
      ORDER BY updated_at ASC
      LIMIT $2`,
     [olderThanHours, limit]
