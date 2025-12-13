@@ -452,13 +452,14 @@ export async function markSessionCleaned(
   db: Pool,
   id: string
 ): Promise<boolean> {
+  const cleanedAt = new Date().toISOString();
   const result = await db.query(
     `UPDATE sessions
-     SET metadata = metadata || '{"cleaned_at": "${new Date().toISOString()}"}'::jsonb,
+     SET metadata = metadata || jsonb_build_object('cleaned_at', $2::text),
          updated_at = NOW()
      WHERE id = $1
      RETURNING id`,
-    [id]
+    [id, cleanedAt]
   );
 
   return result.rows.length > 0;
