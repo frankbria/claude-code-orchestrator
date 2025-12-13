@@ -2,6 +2,27 @@
 import { Pool } from 'pg';
 import crypto from 'crypto';
 
+// Session types for cleanup operations
+export type SessionStatus = 'active' | 'completed' | 'error' | 'stale';
+
+export interface Session {
+  id: string;
+  project_path: string;
+  project_type: string;
+  status: SessionStatus;
+  claude_session_id: string | null;
+  metadata: Record<string, unknown>;
+  created_at: Date;
+  updated_at: Date;
+}
+
+export interface SessionForCleanup {
+  id: string;
+  project_path: string;
+  status: SessionStatus;
+  updated_at: Date;
+}
+
 export interface ApiKey {
   id: string;
   key: string;
@@ -338,4 +359,154 @@ export async function getEventDeliveryStats(
     commandLogs: parseStats(commandLogsResult.rows),
     sessionMessages: parseStats(messagesResult.rows)
   };
+}
+
+// =============================================================================
+// Session Cleanup Query Helpers
+// =============================================================================
+
+/**
+ * Get a session by ID with project_path for cleanup
+ */
+export async function getSessionById(
+  db: Pool,
+  id: string
+): Promise<Session | null> {
+  const result = await db.query(
+    `SELECT id, project_path, project_type, status, claude_session_id,
+            metadata, created_at, updated_at
+     FROM sessions
+     WHERE id = $1`,
+    [id]
+  );
+
+  if (result.rows.length === 0) {
+    return null;
+  }
+
+  return result.rows[0];
+}
+
+/**
+ * Get sessions eligible for cleanup based on status and age
+ *
+ * Returns sessions that are completed, error, or stale and have been
+ * updated more than the specified number of hours ago.
+ *
+ * @param db Database pool
+ * @param olderThanHours Only include sessions older than this many hours
+ * @param limit Maximum number of sessions to return
+ */
+export async function getStaleSessionsForCleanup(
+  db: Pool,
+  olderThanHours: number,
+  limit: number = 100
+): Promise<SessionForCleanup[]> {
+  const result = await db.query(
+    `SELECT id, project_path, status, updated_at
+     FROM sessions
+     WHERE status IN ('completed', 'error', 'stale')
+     AND updated_at < NOW() - make_interval(hours => $1::int)
+     AND (metadata->>'cleaned_at' IS NULL)
+     ORDER BY updated_at ASC
+     LIMIT $2`,
+    [olderThanHours, limit]
+  );
+
+  return result.rows;
+}
+
+/**
+ * Delete a session record after cleanup
+ *
+ * Also deletes associated messages and command logs within a transaction
+ * to prevent partial deletes if any statement fails mid-way.
+ */
+export async function deleteSession(
+  db: Pool,
+  id: string
+): Promise<boolean> {
+  const client = await db.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query(`DELETE FROM session_messages WHERE session_id = $1`, [id]);
+    await client.query(`DELETE FROM command_logs WHERE session_id = $1`, [id]);
+    const result = await client.query(`DELETE FROM sessions WHERE id = $1 RETURNING id`, [id]);
+    await client.query('COMMIT');
+    return result.rows.length > 0;
+  } catch (e) {
+    await client.query('ROLLBACK');
+    throw e;
+  } finally {
+    client.release();
+  }
+}
+
+/**
+ * Mark a session as cleaned (update metadata with cleaned_at timestamp)
+ *
+ * Alternative to deletion - preserves session record for auditing
+ */
+export async function markSessionCleaned(
+  db: Pool,
+  id: string
+): Promise<boolean> {
+  const cleanedAt = new Date().toISOString();
+  const result = await db.query(
+    `UPDATE sessions
+     SET metadata = metadata || jsonb_build_object('cleaned_at', $2::text),
+         updated_at = NOW()
+     WHERE id = $1
+     RETURNING id`,
+    [id, cleanedAt]
+  );
+
+  return result.rows.length > 0;
+}
+
+/**
+ * Update session status
+ */
+export async function updateSessionStatus(
+  db: Pool,
+  id: string,
+  status: SessionStatus
+): Promise<boolean> {
+  const result = await db.query(
+    `UPDATE sessions
+     SET status = $1, updated_at = NOW()
+     WHERE id = $2
+     RETURNING id`,
+    [status, id]
+  );
+
+  return result.rows.length > 0;
+}
+
+/**
+ * Get count of sessions by status
+ */
+export async function getSessionStatusCounts(
+  db: Pool
+): Promise<Record<SessionStatus, number>> {
+  const result = await db.query(`
+    SELECT status, COUNT(*) as count
+    FROM sessions
+    GROUP BY status
+  `);
+
+  const counts: Record<string, number> = {
+    active: 0,
+    completed: 0,
+    error: 0,
+    stale: 0,
+  };
+
+  for (const row of result.rows) {
+    if (row.status in counts) {
+      counts[row.status] = parseInt(row.count, 10);
+    }
+  }
+
+  return counts as Record<SessionStatus, number>;
 }

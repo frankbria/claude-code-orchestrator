@@ -6,7 +6,8 @@ import {
   listApiKeys,
   getApiKeyById,
   revokeApiKey,
-  deleteApiKey
+  deleteApiKey,
+  getSessionById,
 } from '../db/queries';
 import { WorkspaceManager } from '../services/workspace';
 import {
@@ -15,8 +16,10 @@ import {
   addRequestId
 } from '../middleware/validation';
 import { createLogger } from '../utils/logger';
+import { getCleanupConfig } from '../config/cleanup';
 
 const apiLogger = createLogger('api');
+const cleanupLogger = createLogger('cleanup');
 
 /**
  * Middleware to require admin privileges
@@ -164,21 +167,70 @@ export function createRouter(db: Pool) {
   // Update session status
   router.patch('/sessions/:id', async (req, res) => {
     const { status, claudeSessionId } = req.body;
-    
+    const requestId = (req as any).id;
+    const cleanupConfig = getCleanupConfig();
+
+    // Check if this is a terminal status that should trigger cleanup
+    const isTerminalStatus = status === 'completed' || status === 'error';
+
     if (claudeSessionId) {
       await db.query(
         `UPDATE sessions SET claude_session_id = $1, updated_at = NOW() WHERE id = $2`,
         [claudeSessionId, req.params.id]
       );
     }
-    
+
     if (status) {
       await db.query(
         `UPDATE sessions SET status = $1, updated_at = NOW() WHERE id = $2`,
         [status, req.params.id]
       );
+
+      // Trigger automatic cleanup if enabled and status is terminal
+      if (isTerminalStatus && cleanupConfig.enableAutoCleanup) {
+        try {
+          // Get session to retrieve project_path
+          const session = await getSessionById(db, req.params.id);
+
+          if (session && session.project_path) {
+            // Skip cleanup for E2B sandboxes
+            if (session.project_path.startsWith('e2b://')) {
+              cleanupLogger.info('Skipping cleanup for E2B sandbox', {
+                requestId,
+                sessionId: req.params.id,
+              });
+            } else {
+              // Perform cleanup asynchronously (don't block the response)
+              workspaceManager.cleanup(session.project_path, requestId)
+                .then(() => {
+                  cleanupLogger.info('Workspace cleanup completed', {
+                    requestId,
+                    sessionId: req.params.id,
+                    projectPath: session.project_path,
+                    status,
+                  });
+                })
+                .catch((error) => {
+                  cleanupLogger.error('Workspace cleanup failed', {
+                    requestId,
+                    sessionId: req.params.id,
+                    projectPath: session.project_path,
+                    error: error.message,
+                  });
+                });
+            }
+          }
+        } catch (error) {
+          // Log but don't fail the request - cleanup is best-effort
+          cleanupLogger.error('Failed to trigger workspace cleanup', {
+            requestId,
+            sessionId: req.params.id,
+            error: (error as Error).message,
+          });
+        }
+      }
     }
-    
+
     res.json({ status: 'updated' });
   });
 

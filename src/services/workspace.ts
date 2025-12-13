@@ -23,9 +23,11 @@ import { promisify } from 'util';
 import crypto from 'crypto';
 import { validateWorkspacePath, isAllowedPath, getSecureBaseDir } from '../utils/pathValidation';
 import { createLogger } from '../utils/logger';
+import { getCleanupConfig } from '../config/cleanup';
 
 const execFileAsync = promisify(execFile);
 const securityLogger = createLogger('security');
+const cleanupLogger = createLogger('cleanup');
 
 /**
  * Session configuration for workspace preparation
@@ -54,6 +56,32 @@ export interface SessionConfig {
  *
  * @class
  */
+/**
+ * Result of disk space check
+ */
+export interface DiskSpaceInfo {
+  /** Available disk space in GB */
+  availableGB: number;
+  /** Total disk space in GB */
+  totalGB: number;
+  /** Used disk space in GB */
+  usedGB: number;
+  /** Usage percentage (0-100) */
+  usagePercent: number;
+}
+
+/**
+ * Result of workspace quota check
+ */
+export interface WorkspaceQuotaInfo {
+  /** Current number of workspaces */
+  count: number;
+  /** Maximum allowed workspaces */
+  quota: number;
+  /** Whether quota is exceeded */
+  exceeded: boolean;
+}
+
 export class WorkspaceManager {
   private baseDir: string;
 
@@ -65,6 +93,302 @@ export class WorkspaceManager {
    */
   constructor(baseDir?: string) {
     this.baseDir = baseDir || getSecureBaseDir();
+  }
+
+  /**
+   * Get the base directory for workspaces
+   *
+   * @returns {string} The base directory path
+   */
+  getBaseDir(): string {
+    return this.baseDir;
+  }
+
+  /**
+   * Check if a directory matches workspace patterns
+   *
+   * Used by both countWorkspaces() and cleanup() to ensure consistent
+   * workspace identification. A directory is considered a workspace if:
+   * - Its name starts with 'gh-' (GitHub clone)
+   * - Its name starts with 'wt-' (git worktree)
+   * - Its full path contains 'claude-workspaces'
+   *
+   * @private
+   * @param {string} name - Directory basename
+   * @param {string} [fullPath] - Optional full path for additional checks
+   * @returns {boolean} True if directory matches workspace patterns
+   */
+  private isWorkspaceDirectory(name: string, fullPath?: string): boolean {
+    // Check name-based patterns (gh- for GitHub clones, wt- for worktrees)
+    if (name.startsWith('gh-') || name.startsWith('wt-')) {
+      return true;
+    }
+
+    // Check if path is within claude-workspaces directory
+    if (fullPath && fullPath.includes('claude-workspaces')) {
+      return true;
+    }
+
+    return false;
+  }
+
+  /**
+   * Check available disk space for the workspace directory
+   *
+   * Uses the `df` command to query disk space information for the
+   * workspace base directory.
+   *
+   * @param {string} [requestId] - Request ID for correlation in logs
+   * @returns {Promise<DiskSpaceInfo>} Disk space information
+   *
+   * @example
+   * ```typescript
+   * const manager = new WorkspaceManager();
+   * const diskInfo = await manager.checkDiskSpace('req-123');
+   * console.log(`Available: ${diskInfo.availableGB} GB`);
+   * ```
+   */
+  async checkDiskSpace(requestId?: string): Promise<DiskSpaceInfo> {
+    try {
+      // Use df command to get disk space info
+      // -k outputs in 1K blocks for consistent parsing
+      // SECURITY: Use execFileAsync with separate arguments to prevent shell injection
+      const { stdout } = await execFileAsync('df', ['-k', this.baseDir], {
+        encoding: 'utf8',
+        timeout: 5000,
+      });
+
+      // Parse df output: Filesystem 1K-blocks Used Available Use% Mounted
+      // Get the last line (skip header line)
+      const lines = stdout.trim().split('\n');
+      const lastLine = lines[lines.length - 1];
+      const parts = lastLine.trim().split(/\s+/);
+
+      if (parts.length < 5) {
+        throw new Error('Unexpected df output format');
+      }
+
+      // Convert from 1K blocks to GB (1GB = 1048576 1K-blocks)
+      const totalKB = parseInt(parts[1], 10);
+      const usedKB = parseInt(parts[2], 10);
+      const availableKB = parseInt(parts[3], 10);
+      const usagePercent = parseInt(parts[4].replace('%', ''), 10);
+
+      const diskInfo: DiskSpaceInfo = {
+        availableGB: Math.round((availableKB / 1048576) * 100) / 100,
+        totalGB: Math.round((totalKB / 1048576) * 100) / 100,
+        usedGB: Math.round((usedKB / 1048576) * 100) / 100,
+        usagePercent,
+      };
+
+      cleanupLogger.info('Disk space checked', {
+        requestId,
+        availableGB: diskInfo.availableGB,
+        usagePercent: diskInfo.usagePercent,
+        timestamp: new Date().toISOString(),
+      });
+
+      return diskInfo;
+    } catch (error) {
+      cleanupLogger.error('Failed to check disk space', {
+        requestId,
+        error: (error as Error).message,
+        timestamp: new Date().toISOString(),
+      });
+
+      // Return safe defaults that won't block operations
+      return {
+        availableGB: 999,
+        totalGB: 999,
+        usedGB: 0,
+        usagePercent: 0,
+      };
+    }
+  }
+
+  /**
+   * Count the number of workspace directories
+   *
+   * Counts directories in the workspace base that match workspace patterns
+   * (gh-*, wt-*, or any directory within claude-workspaces).
+   *
+   * @param {string} [requestId] - Request ID for correlation in logs
+   * @returns {Promise<WorkspaceQuotaInfo>} Workspace count information
+   *
+   * @example
+   * ```typescript
+   * const manager = new WorkspaceManager();
+   * const quotaInfo = await manager.countWorkspaces('req-123');
+   * console.log(`Workspaces: ${quotaInfo.count}/${quotaInfo.quota}`);
+   * ```
+   */
+  async countWorkspaces(requestId?: string): Promise<WorkspaceQuotaInfo> {
+    const config = getCleanupConfig();
+
+    try {
+      const entries = await fs.readdir(this.baseDir, { withFileTypes: true });
+
+      // Count directories that match workspace patterns
+      const workspaces = entries.filter(entry => {
+        if (!entry.isDirectory()) return false;
+        const fullPath = path.join(this.baseDir, entry.name);
+        return this.isWorkspaceDirectory(entry.name, fullPath);
+      });
+
+      const quotaInfo: WorkspaceQuotaInfo = {
+        count: workspaces.length,
+        quota: config.maxWorkspaces,
+        exceeded: workspaces.length >= config.maxWorkspaces,
+      };
+
+      cleanupLogger.info('Workspace count checked', {
+        requestId,
+        count: quotaInfo.count,
+        quota: quotaInfo.quota,
+        timestamp: new Date().toISOString(),
+      });
+
+      return quotaInfo;
+    } catch (error) {
+      // If directory doesn't exist, count is 0
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        return {
+          count: 0,
+          quota: config.maxWorkspaces,
+          exceeded: false,
+        };
+      }
+
+      cleanupLogger.error('Failed to count workspaces', {
+        requestId,
+        error: (error as Error).message,
+        timestamp: new Date().toISOString(),
+      });
+
+      // Return safe defaults
+      return {
+        count: 0,
+        quota: config.maxWorkspaces,
+        exceeded: false,
+      };
+    }
+  }
+
+  /**
+   * Archive a workspace before deletion
+   *
+   * Creates a tar.gz archive of the workspace directory and stores it
+   * in the configured archive directory. Archives are named with the
+   * workspace basename and a timestamp.
+   *
+   * @param {string} workspacePath - Path to workspace to archive
+   * @param {string} [requestId] - Request ID for correlation in logs
+   * @returns {Promise<string | null>} Path to created archive, or null if archival failed
+   *
+   * @example
+   * ```typescript
+   * const manager = new WorkspaceManager();
+   * const archivePath = await manager.archiveWorkspace(
+   *   '/workspace/gh-abc-123',
+   *   'req-456'
+   * );
+   * console.log(`Archived to: ${archivePath}`);
+   * ```
+   */
+  async archiveWorkspace(workspacePath: string, requestId?: string): Promise<string | null> {
+    const config = getCleanupConfig();
+
+    if (!config.archiveWorkspaces) {
+      return null;
+    }
+
+    try {
+      // Validate workspace path
+      const validatedPath = await validateWorkspacePath(workspacePath, requestId);
+
+      // Ensure archive directory exists
+      await fs.mkdir(config.archiveDir, { recursive: true, mode: 0o750 });
+
+      // Generate archive filename
+      const basename = path.basename(validatedPath);
+      const timestamp = Date.now();
+      const archiveFilename = `${basename}-${timestamp}.tar.gz`;
+      const archivePath = path.join(config.archiveDir, archiveFilename);
+
+      // Create tar.gz archive
+      await execFileAsync('tar', [
+        '-czf',
+        archivePath,
+        '-C',
+        path.dirname(validatedPath),
+        basename,
+      ], {
+        timeout: 300000, // 5 minute timeout
+      });
+
+      cleanupLogger.info('Workspace archived', {
+        requestId,
+        workspacePath: basename,
+        archivePath: archiveFilename,
+        timestamp: new Date().toISOString(),
+      });
+
+      return archivePath;
+    } catch (error) {
+      cleanupLogger.error('Failed to archive workspace', {
+        requestId,
+        error: (error as Error).message,
+        timestamp: new Date().toISOString(),
+      });
+
+      // Return null to indicate archival failed, but don't block cleanup
+      return null;
+    }
+  }
+
+  /**
+   * Validate quota before creating workspace
+   *
+   * Checks disk space and workspace count quotas before allowing
+   * workspace creation. Throws an error if quotas are exceeded.
+   *
+   * @param {string} [requestId] - Request ID for correlation in logs
+   * @throws {Error} If disk space or workspace quota is exceeded
+   *
+   * @example
+   * ```typescript
+   * const manager = new WorkspaceManager();
+   * await manager.validateQuota('req-123'); // Throws if quota exceeded
+   * ```
+   */
+  private async validateQuota(requestId?: string): Promise<void> {
+    const config = getCleanupConfig();
+
+    // Check disk space
+    const diskInfo = await this.checkDiskSpace(requestId);
+
+    if (diskInfo.availableGB < config.minDiskSpaceGB) {
+      cleanupLogger.error('Insufficient disk space for workspace creation', {
+        requestId,
+        availableGB: diskInfo.availableGB,
+        requiredGB: config.minDiskSpaceGB,
+        timestamp: new Date().toISOString(),
+      });
+      throw new Error(`Insufficient disk space: ${diskInfo.availableGB}GB available, ${config.minDiskSpaceGB}GB required`);
+    }
+
+    // Check workspace count
+    const quotaInfo = await this.countWorkspaces(requestId);
+
+    if (quotaInfo.exceeded) {
+      cleanupLogger.error('Workspace quota exceeded', {
+        requestId,
+        count: quotaInfo.count,
+        quota: quotaInfo.quota,
+        timestamp: new Date().toISOString(),
+      });
+      throw new Error(`Workspace quota exceeded: ${quotaInfo.count}/${quotaInfo.quota} workspaces`);
+    }
   }
 
   /**
@@ -102,6 +426,11 @@ export class WorkspaceManager {
       projectType: config.projectType,
       timestamp: new Date().toISOString(),
     });
+
+    // Validate quota before creating workspace (skip for e2b sandboxes)
+    if (config.projectType !== 'e2b') {
+      await this.validateQuota(requestId);
+    }
 
     switch (config.projectType) {
       case 'local':
@@ -418,11 +747,8 @@ export class WorkspaceManager {
 
     // Additional safety check: ensure it's actually a workspace directory
     const basename = path.basename(validatedPath);
-    const isWorkspaceDir = basename.startsWith('gh-') ||
-                           basename.startsWith('wt-') ||
-                           validatedPath.includes('claude-workspaces');
 
-    if (!isWorkspaceDir) {
+    if (!this.isWorkspaceDirectory(basename, validatedPath)) {
       securityLogger.error('Attempted to delete non-workspace directory', {
         requestId,
         timestamp: new Date().toISOString(),
@@ -430,10 +756,24 @@ export class WorkspaceManager {
       throw new Error('Invalid cleanup target');
     }
 
+    // Archive workspace if enabled (before deletion)
+    const config = getCleanupConfig();
+    if (config.archiveWorkspaces) {
+      const archivePath = await this.archiveWorkspace(validatedPath, requestId);
+      if (archivePath) {
+        cleanupLogger.info('Workspace archived before cleanup', {
+          requestId,
+          archivePath,
+          timestamp: new Date().toISOString(),
+        });
+      }
+    }
+
     await fs.rm(validatedPath, { recursive: true, force: true });
 
-    securityLogger.info('Workspace cleaned up', {
+    cleanupLogger.info('Workspace cleaned up', {
       requestId,
+      workspacePath: basename,
       timestamp: new Date().toISOString(),
     });
   }

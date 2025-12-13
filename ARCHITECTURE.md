@@ -1417,6 +1417,175 @@ router.post('/tool-complete', async (req, res) => {
 
 ---
 
+## Workspace Lifecycle Management
+
+The system includes comprehensive workspace lifecycle management to prevent disk exhaustion and manage resources efficiently.
+
+### Automatic Cleanup Triggers
+
+Workspaces are automatically cleaned up when session status changes to terminal states:
+
+1. **Session Completion**: When `PATCH /api/sessions/:id` is called with `status: "completed"`
+2. **Session Error**: When `PATCH /api/sessions/:id` is called with `status: "error"`
+3. **Scheduled Cleanup**: A background job periodically cleans up orphaned workspaces
+
+### Cleanup Flow
+
+```
+┌─────────────┐     ┌─────────────┐     ┌─────────────┐     ┌─────────────┐
+│   Client    │────▶│  PATCH API  │────▶│   Cleanup   │────▶│  Workspace  │
+│             │     │  /sessions  │     │   Logic     │     │  Manager    │
+└─────────────┘     └──────┬──────┘     └──────┬──────┘     └──────┬──────┘
+                           │                   │                   │
+                           │ status=completed  │                   │
+                           │ or status=error   │                   │
+                           │                   │                   │
+                           │                   ▼                   │
+                           │            ┌─────────────┐            │
+                           │            │ Get session │            │
+                           │            │ project_path│            │
+                           │            └──────┬──────┘            │
+                           │                   │                   │
+                           │                   ▼                   │
+                           │            ┌─────────────┐            │
+                           │            │ Archive?    │            │
+                           │            │(if enabled) │            │
+                           │            └──────┬──────┘            │
+                           │                   │                   │
+                           │                   ▼                   │
+                           │            ┌─────────────┐            │
+                           │            │ Delete      │◀───────────┘
+                           │            │ workspace   │
+                           │            └─────────────┘
+                           │
+                           ▼
+                    200 OK (async cleanup)
+```
+
+### Scheduled Cleanup Job
+
+A background job runs periodically to clean up orphaned workspaces:
+
+```
+┌─────────────┐     ┌─────────────┐     ┌─────────────┐
+│  node-cron  │────▶│ Query stale │────▶│  Cleanup    │
+│  scheduler  │     │  sessions   │     │  each       │
+└─────────────┘     └─────────────┘     └─────────────┘
+                           │
+                           │ SELECT sessions WHERE
+                           │ status IN ('completed','error','stale')
+                           │ AND updated_at < NOW() - interval
+                           │
+                           ▼
+                    ┌─────────────┐
+                    │ For each:   │
+                    │ 1. Archive  │
+                    │ 2. Delete   │
+                    │ 3. Update DB│
+                    └─────────────┘
+```
+
+### Quota Enforcement
+
+Before creating a new workspace, the system validates quotas:
+
+1. **Disk Space Check**: Ensures sufficient disk space is available
+2. **Workspace Count Check**: Ensures maximum workspace limit is not exceeded
+
+If either check fails, workspace creation is rejected with an appropriate error message.
+
+### Configuration Options
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `WORKSPACE_BASE` | string | `/tmp/claude-workspaces` | Base directory for workspaces |
+| `ENABLE_AUTO_CLEANUP` | boolean | `true` | Enable cleanup on session completion |
+| `ENABLE_SCHEDULED_CLEANUP` | boolean | `true` | Enable background cleanup job |
+| `CLEANUP_CRON_EXPRESSION` | string | `0 * * * *` | Cron schedule for cleanup job |
+| `CLEANUP_INTERVAL_HOURS` | number | `24` | Hours before cleaning completed sessions |
+| `CLEANUP_DELETE_SESSIONS` | boolean | `false` | Delete session records after cleanup |
+| `MAX_WORKSPACES` | number | `100` | Maximum concurrent workspaces |
+| `MIN_DISK_SPACE_GB` | number | `5` | Minimum free disk space required |
+| `ARCHIVE_WORKSPACES` | boolean | `false` | Archive workspaces before deletion |
+| `ARCHIVE_DIR` | string | `/var/archives/claude-workspaces` | Directory for archives |
+
+### Health Check Integration
+
+The `/health` endpoint reports workspace, disk space, and archival capability status:
+
+```json
+{
+  "status": "ok",
+  "timestamp": "2024-01-15T10:30:00Z",
+  "components": {
+    "database": "connected",
+    "retryDaemon": { "running": true, "pendingRetries": 0 },
+    "cleanupJob": {
+      "running": false,
+      "lastRun": "2024-01-15T10:00:00Z",
+      "sessionsProcessed": 5,
+      "workspacesDeleted": 5,
+      "errors": 0
+    },
+    "disk": {
+      "availableGB": 45.2,
+      "thresholdGB": 5,
+      "status": "ok"
+    },
+    "workspaces": {
+      "count": 23,
+      "quota": 100,
+      "status": "ok"
+    },
+    "archival": {
+      "enabled": true,
+      "tarAvailable": true,
+      "status": "ok"
+    }
+  }
+}
+```
+
+### Archival
+
+When `ARCHIVE_WORKSPACES=true`, workspaces are archived as tar.gz files before deletion:
+
+1. Archive filename format: `{workspace-basename}-{timestamp}.tar.gz`
+2. Archives are stored in `ARCHIVE_DIR`
+3. Archive directory is created automatically with mode 0750
+
+**System Requirement:** The `tar` command must be available in PATH when archival is enabled.
+
+- At startup, the system validates tar availability via pre-flight check
+- If tar is unavailable, archival is automatically disabled with a warning log
+- The `/health` endpoint reports archival capability status
+- Install tar: `apt-get install tar` (Debian/Ubuntu), `apk add tar` (Alpine), pre-installed on macOS
+
+### Troubleshooting Cleanup
+
+1. **Cleanup not triggering on session completion:**
+   - Verify `ENABLE_AUTO_CLEANUP=true`
+   - Check logs for cleanup errors
+   - Verify session has a valid `project_path`
+
+2. **Scheduled cleanup not running:**
+   - Verify `ENABLE_SCHEDULED_CLEANUP=true`
+   - Check cleanup job status in `/health` endpoint
+   - Verify cron expression is valid
+
+3. **Disk space warnings:**
+   - Check disk space with `df -h`
+   - Review cleanup logs for errors
+   - Consider lowering `CLEANUP_INTERVAL_HOURS`
+   - Manually trigger cleanup if needed
+
+4. **Workspace quota exceeded:**
+   - Increase `MAX_WORKSPACES` if appropriate
+   - Check for orphaned workspaces
+   - Review sessions in database for stale entries
+
+---
+
 ## Security Considerations
 
 ### API Authentication
