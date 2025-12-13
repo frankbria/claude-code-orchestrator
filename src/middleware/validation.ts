@@ -135,7 +135,7 @@ export async function validateSessionCreate(
         }
         break;
 
-      case 'local':
+      case 'local': {
         // Validate local path with multiple security layers
         if (!projectPath || typeof projectPath !== 'string') {
           throw new Error('Project path required');
@@ -166,6 +166,7 @@ export async function validateSessionCreate(
           throw new Error('Path not allowed');
         }
         break;
+      }
 
       case 'worktree':
         // Validate base path for git worktree creation

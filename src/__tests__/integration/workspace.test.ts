@@ -38,7 +38,8 @@ const execFileAsync = promisify(execFile);
 
 // Test workspace base directory
 // Use path that matches allowlist patterns in pathValidation.ts
-const TEST_WORKSPACE_BASE = '/tmp/claude-workspaces/test-integration';
+// Use unique directory per test run to support parallel execution
+const TEST_WORKSPACE_BASE = `/tmp/claude-workspaces/test-integration-${crypto.randomUUID().slice(0, 8)}`;
 
 // Mock database pool for isolated testing
 class MockPool extends Pool {

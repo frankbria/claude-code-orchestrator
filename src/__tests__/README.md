@@ -6,7 +6,7 @@ This directory contains comprehensive integration tests for the Claude Orchestra
 
 ## Test Structure
 
-```
+```text
 __tests__/
 ├── integration/
 │   └── workspace.test.ts    # End-to-end workspace creation tests
@@ -171,7 +171,7 @@ The test suite sets:
 ### File System Layout
 
 During tests:
-```
+```text
 /tmp/test-workspaces/
 ├── test-local-workspace/          # Local workspace test
 ├── gh-{uuid}-{timestamp}/         # GitHub clone test

@@ -51,11 +51,15 @@ jobs:
         env:
           # Set test environment to use /tmp for workspaces
           CI: true
+          WORKSPACE_BASE: /tmp/test-workspaces
+          LOG_DIR: /tmp/test-logs
 
       - name: Run security tests with coverage
         run: npm run test:coverage -- src/__tests__/security
         env:
           CI: true
+          WORKSPACE_BASE: /tmp/test-workspaces
+          LOG_DIR: /tmp/test-logs
 
       - name: Check coverage thresholds
         run: npm run test:coverage -- --coverageThreshold='{"global":{"branches":85,"functions":85,"lines":85,"statements":85}}'

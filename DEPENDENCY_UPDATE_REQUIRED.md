@@ -47,7 +47,7 @@ npm list express-rate-limit
 ```
 
 Expected output:
-```
+```text
 claude-orchestrator@1.0.0 /home/frankbria/projects/claude-orchestrator
 └── express-rate-limit@7.1.5
 ```

@@ -287,10 +287,10 @@ If coverage drops below 85%:
 
 ## References
 
-- OWASP Path Traversal: https://owasp.org/www-community/attacks/Path_Traversal
-- OWASP Command Injection: https://owasp.org/www-community/attacks/Command_Injection
-- CWE-367 TOCTOU: https://cwe.mitre.org/data/definitions/367.html
-- Node.js Security: https://nodejs.org/en/docs/guides/security/
+- OWASP Path Traversal: <https://owasp.org/www-community/attacks/Path_Traversal>
+- OWASP Command Injection: <https://owasp.org/www-community/attacks/Command_Injection>
+- CWE-367 TOCTOU: <https://cwe.mitre.org/data/definitions/367.html>
+- Node.js Security: <https://nodejs.org/en/docs/guides/security/>
 
 ## Next Steps
 

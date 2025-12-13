@@ -577,7 +577,7 @@ Set up alerts for:
 ### Log Rotation
 
 Configure log rotation for `/var/log/claude-orchestrator/security.log`:
-```
+```text
 /var/log/claude-orchestrator/security.log {
     daily
     rotate 90

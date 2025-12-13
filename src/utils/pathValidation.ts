@@ -258,10 +258,15 @@ export function isAllowedPath(resolvedPath: string): boolean {
   // Allowlist patterns for workspace directories
   // Update these patterns to match your deployment environment
   const allowedPatterns = [
+    // Unix/Linux/macOS patterns
     /^\/tmp\/claude-workspaces\/.+$/,
     /^\/workspace\/.+$/,
     /^\/home\/[\w-]+\/claude-workspaces\/.+$/,
     /^\/opt\/claude-workspaces\/.+$/,
+    // Windows patterns
+    /^[A-Za-z]:\\claude-workspaces\\.+$/,
+    /^[A-Za-z]:\\Users\\[\w-]+\\claude-workspaces\\.+$/,
+    /^[A-Za-z]:\\workspace\\.+$/,
   ];
 
   return allowedPatterns.some(pattern => pattern.test(resolvedPath));
