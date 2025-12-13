@@ -86,6 +86,21 @@ truncate_message() {
     fi
 }
 
+# Escape a string for safe JSON interpolation
+# Handles: backslash, double quote, newline, carriage return, tab
+json_escape() {
+    local str="$1"
+    # Use printf and sed for escaping
+    # Order matters: escape backslashes first, then other characters
+    printf '%s' "$str" | sed \
+        -e 's/\\/\\\\/g' \
+        -e 's/"/\\"/g' \
+        -e 's/\t/\\t/g' \
+        -e ':a' -e 'N' -e '$!ba' \
+        -e 's/\r/\\r/g' \
+        -e 's/\n/\\n/g'
+}
+
 # Main execution
 main() {
     # Generate unique event ID
@@ -118,7 +133,12 @@ main() {
     # Ensure we have valid JSON
     if [ -z "$event_json" ]; then
         # Fallback: minimal JSON without jq
-        event_json="{\"eventId\":\"$event_id\",\"eventType\":\"notification\",\"session\":\"${CLAUDE_SESSION_ID:-unknown}\",\"timestamp\":\"$timestamp\"}"
+        # Escape all interpolated values to prevent JSON injection
+        local escaped_event_id escaped_session escaped_timestamp
+        escaped_event_id=$(json_escape "$event_id")
+        escaped_session=$(json_escape "${CLAUDE_SESSION_ID:-unknown}")
+        escaped_timestamp=$(json_escape "$timestamp")
+        event_json="{\"eventId\":\"$escaped_event_id\",\"eventType\":\"notification\",\"session\":\"$escaped_session\",\"timestamp\":\"$escaped_timestamp\"}"
     fi
 
     # Ensure log directory exists
