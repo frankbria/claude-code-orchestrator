@@ -437,13 +437,16 @@ describe('CleanupJob', () => {
   });
 
   it('should not run if already running', async () => {
-    // Simulate running state
-    (cleanupJob as any).isRunning = true;
+    // Simulate lock being held by setting lockPromise
+    (cleanupJob as any).lockPromise = new Promise(() => {});
 
     const stats = await cleanupJob.runCleanup();
 
     // Should return existing stats without processing
     expect(stats.sessionsProcessed).toBe(0);
+
+    // Clean up the mock lock
+    (cleanupJob as any).lockPromise = null;
   });
 
   it('should report cleanup stats correctly', () => {

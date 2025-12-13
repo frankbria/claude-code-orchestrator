@@ -54,7 +54,6 @@ export class CleanupJob {
   private db: Pool;
   private workspaceManager: WorkspaceManager;
   private config: CleanupConfig;
-  private isRunning: boolean = false;
   private stats: CleanupStats = {
     sessionsProcessed: 0,
     workspacesDeleted: 0,
@@ -65,10 +64,43 @@ export class CleanupJob {
     lastRun: null,
   };
 
+  // Mutex for preventing concurrent cleanup runs
+  private lockPromise: Promise<void> | null = null;
+  private releaseLock: (() => void) | null = null;
+
   constructor(db: Pool, workspaceManager?: WorkspaceManager) {
     this.db = db;
     this.config = getCleanupConfig();
     this.workspaceManager = workspaceManager || new WorkspaceManager();
+  }
+
+  /**
+   * Try to acquire the cleanup lock atomically.
+   * Returns true if lock was acquired, false if already held.
+   */
+  private tryAcquireLock(): boolean {
+    if (this.lockPromise !== null) {
+      return false;
+    }
+
+    // Create a new lock - this is atomic because JS is single-threaded
+    // for synchronous operations
+    this.lockPromise = new Promise<void>((resolve) => {
+      this.releaseLock = resolve;
+    });
+
+    return true;
+  }
+
+  /**
+   * Release the cleanup lock
+   */
+  private doReleaseLock(): void {
+    if (this.releaseLock) {
+      this.releaseLock();
+    }
+    this.lockPromise = null;
+    this.releaseLock = null;
   }
 
   /**
@@ -112,7 +144,7 @@ export class CleanupJob {
    * Check if cleanup job is currently running
    */
   isCleanupRunning(): boolean {
-    return this.isRunning;
+    return this.lockPromise !== null;
   }
 
   /**
@@ -126,12 +158,12 @@ export class CleanupJob {
    * Run cleanup manually (also called by cron schedule)
    */
   async runCleanup(): Promise<CleanupStats> {
-    if (this.isRunning) {
+    // Atomically try to acquire the lock
+    if (!this.tryAcquireLock()) {
       logger.warn('Cleanup already in progress, skipping');
       return this.stats;
     }
 
-    this.isRunning = true;
     const startTime = Date.now();
 
     // Reset stats for this run
@@ -145,12 +177,12 @@ export class CleanupJob {
       lastRun: new Date(),
     };
 
-    logger.info('Starting scheduled cleanup', {
-      cleanupIntervalHours: this.config.cleanupIntervalHours,
-      timestamp: new Date().toISOString(),
-    });
-
     try {
+      logger.info('Starting scheduled cleanup', {
+        cleanupIntervalHours: this.config.cleanupIntervalHours,
+        timestamp: new Date().toISOString(),
+      });
+
       // Get sessions eligible for cleanup
       const sessions = await getStaleSessionsForCleanup(
         this.db,
@@ -211,7 +243,8 @@ export class CleanupJob {
         timestamp: new Date().toISOString(),
       });
     } finally {
-      this.isRunning = false;
+      // Always release the lock
+      this.doReleaseLock();
     }
 
     return runStats;
