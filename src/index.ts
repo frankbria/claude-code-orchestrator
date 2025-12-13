@@ -70,8 +70,16 @@ const server = app.listen(port, () => {
   // Start the retry daemon if enabled
   const enableRetryDaemon = process.env.ENABLE_RETRY_DAEMON !== 'false';
   if (enableRetryDaemon) {
-    startRetryDaemon();
-    logger.info('Retry daemon started');
+    try {
+      startRetryDaemon();
+      logger.info('Retry daemon started');
+    } catch (error) {
+      logger.error('Failed to start retry daemon', {
+        error: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? error.stack : undefined
+      });
+      // Continue running the server - retry daemon is not critical for basic operation
+    }
   }
 });
 
