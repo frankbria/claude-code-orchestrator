@@ -133,31 +133,40 @@ describe('Security Attack Vector Prevention', () => {
       }
     });
 
-    test('should block URL-encoded path traversal (%2e%2e%2f)', async () => {
-      // Simulate URL-encoded traversal (though Node.js path doesn't auto-decode)
+    test('should handle URL-encoded path traversal (%2e%2e%2f)', async () => {
+      // NOTE: URL encoding is NOT automatically decoded by Node.js path functions.
+      // The literal string '%2e%2e%2f' becomes a directory name, not '../'
+      // URL decoding should be handled at the HTTP layer (Express/middleware).
+      // This test verifies that:
+      // 1. Encoded paths within workspace are allowed (they're literal directory names)
+      // 2. Decoded paths with traversal ARE blocked (tested in 'basic path traversal' test)
       const encodedPath = testBaseDir + '/%2e%2e%2f%2e%2e%2fetc/passwd';
 
-      await expect(validateWorkspacePath(encodedPath)).rejects.toThrow();
-
-      try {
-        await validateWorkspacePath(encodedPath);
-      } catch (error) {
-        expectSecurityBlock(error as Error);
-      }
+      // This path is valid because '%2e%2e%2f' is a literal directory name within workspace
+      // The real attack would require the HTTP layer to decode it first
+      const result = await validateWorkspacePath(encodedPath);
+      expect(result).toContain(testBaseDir);
     });
 
-    test('should block double-encoded path traversal', async () => {
+    test('should handle double-encoded path traversal', async () => {
       // Double URL encoding: ../ -> %2e%2e%2f -> %252e%252e%252f
+      // Same principle: encoding is handled at HTTP layer, not path validation
       const doubleEncodedPath = testBaseDir + '/%252e%252e%252f%252e%252e%252fetc';
 
-      await expect(validateWorkspacePath(doubleEncodedPath)).rejects.toThrow();
+      // This path is valid because the encoded string is a literal directory name
+      const result = await validateWorkspacePath(doubleEncodedPath);
+      expect(result).toContain(testBaseDir);
     });
 
-    test('should block Unicode path traversal (U+2215, U+FF0E)', async () => {
-      // Unicode slash (U+2215) and full-width dot (U+FF0E)
+    test('should handle Unicode alternative separators', async () => {
+      // Unicode slash (U+2215) and full-width dot (U+FF0E) are NOT path separators
+      // on most file systems. They become literal characters in directory names.
+      // This is by design - the filesystem determines what's a separator.
       const unicodePath = testBaseDir + '/\u2215..\u2215..\u2215etc\u2215passwd';
 
-      await expect(validateWorkspacePath(unicodePath)).rejects.toThrow();
+      // This path is valid because U+2215 is not treated as a path separator
+      const result = await validateWorkspacePath(unicodePath);
+      expect(result).toContain(testBaseDir);
     });
 
     test('should block path separator bypass (workspaces-evil vs workspaces/)', async () => {
@@ -430,9 +439,18 @@ describe('Security Attack Vector Prevention', () => {
       // Verify execFile is imported
       expect(workspaceCode).toMatch(/import.*execFile.*from.*child_process/);
 
-      // Verify no usage of exec (shell-based) - must not have execSync or raw exec
+      // Verify no usage of exec (shell-based) - must not have execSync
       expect(workspaceCode).not.toMatch(/\bexecSync\(/);
-      expect(workspaceCode).not.toMatch(/[^a-zA-Z]exec\(/); // exec( but not execFile( or execFileAsync(
+
+      // Check for raw exec() calls (not execFile or execFileAsync)
+      // Remove comments first to avoid false positives from documentation
+      const codeWithoutComments = workspaceCode
+        .replace(/\/\*[\s\S]*?\*\//g, '')  // Remove block comments
+        .replace(/\/\/.*$/gm, '');          // Remove line comments
+
+      // Now check for exec( that isn't part of execFile
+      const hasUnsafeExec = /(?<!execFile)(?<!execFileAsync)\bexec\s*\(/.test(codeWithoutComments);
+      expect(hasUnsafeExec).toBe(false);
 
       // Verify execFileAsync is used for git operations
       expect(workspaceCode).toMatch(/execFileAsync\(/);
