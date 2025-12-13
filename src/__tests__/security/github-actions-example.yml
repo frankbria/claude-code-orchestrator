@@ -1,0 +1,153 @@
+# GitHub Actions Security Testing Workflow
+#
+# This workflow runs comprehensive security tests on every push and pull request.
+# It ensures all attack vector prevention controls are working before code is merged.
+#
+# To use this workflow:
+# 1. Copy this file to .github/workflows/security-tests.yml
+# 2. Commit and push to your repository
+# 3. Tests will run automatically on every push/PR
+#
+# Features:
+# - Runs all 47 security attack vector tests
+# - Enforces 85% minimum code coverage
+# - Uploads coverage reports as artifacts
+# - Fails build if any security test fails
+# - Tests on multiple Node.js versions (18, 20)
+# - Caches dependencies for faster runs
+
+name: Security Tests
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+jobs:
+  security-tests:
+    name: Security Attack Vector Tests
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        node-version: [18, 20]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run security tests
+        run: npm run test:security
+        env:
+          # Use allowlisted workspace path (matches /tmp/claude-workspaces/.+ pattern)
+          CI: true
+          WORKSPACE_BASE: /tmp/claude-workspaces/ci
+          LOG_DIR: /tmp/claude-orchestrator-logs
+
+      - name: Run security tests with coverage
+        run: npm run test:coverage -- src/__tests__/security
+        env:
+          CI: true
+          WORKSPACE_BASE: /tmp/claude-workspaces/ci
+          LOG_DIR: /tmp/claude-orchestrator-logs
+
+      - name: Check coverage thresholds
+        run: npm run test:coverage -- --coverageThreshold='{"global":{"branches":85,"functions":85,"lines":85,"statements":85}}'
+
+      - name: Upload coverage reports
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-report-node-${{ matrix.node-version }}
+          path: coverage/
+          retention-days: 7
+
+      - name: Upload security test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: security-test-results-node-${{ matrix.node-version }}
+          path: |
+            coverage/
+            junit.xml
+          retention-days: 7
+
+      # Optional: Send coverage to Codecov
+      # - name: Upload to Codecov
+      #   uses: codecov/codecov-action@v4
+      #   with:
+      #     files: ./coverage/lcov.info
+      #     flags: security-tests
+      #     name: codecov-security
+
+  # Optional: Run linting and type checking
+  code-quality:
+    name: Code Quality Checks
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: TypeScript type checking
+        run: npx tsc --noEmit
+
+      # Uncomment when you add ESLint
+      # - name: Lint code
+      #   run: npm run lint
+
+  # Optional: Security scanning with npm audit
+  npm-audit:
+    name: NPM Dependency Audit
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Run npm audit
+        run: npm audit --audit-level=moderate
+        continue-on-error: true
+
+      - name: Run npm audit (strict)
+        run: npm audit --audit-level=high
+
+  # Require all checks to pass
+  all-security-checks:
+    name: All Security Checks Passed
+    needs: [security-tests, code-quality, npm-audit]
+    runs-on: ubuntu-latest
+    if: always()
+
+    steps:
+      - name: Check all jobs succeeded
+        if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
+        run: exit 1
+
+      - name: All checks passed
+        run: echo "✅ All security checks passed successfully!"
