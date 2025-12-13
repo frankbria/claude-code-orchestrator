@@ -269,6 +269,7 @@ async function validateParentDirectories(
  * - Future vulnerabilities in path validation logic
  * - Misconfiguration of WORKSPACE_BASE
  * - Unexpected edge cases in path resolution
+ * - Path traversal attempts (defense-in-depth normalization)
  *
  * @param {string} resolvedPath - The fully resolved absolute path to check
  * @returns {boolean} True if path matches an allowed pattern
@@ -282,6 +283,16 @@ async function validateParentDirectories(
  * console.log(blocked); // false
  */
 export function isAllowedPath(resolvedPath: string): boolean {
+  // SECURITY: Reject relative paths - only absolute paths are allowed
+  // This prevents ambiguity in path resolution and ensures consistent behavior
+  if (!path.isAbsolute(resolvedPath)) {
+    return false;
+  }
+
+  // DEFENSE-IN-DEPTH: Normalize path to catch any traversal attempts
+  // that might slip through if this function is called with unresolved paths
+  const normalizedPath = path.resolve(resolvedPath);
+
   // Allowlist patterns for workspace directories
   // Update these patterns to match your deployment environment
   const allowedPatterns = [
@@ -296,5 +307,5 @@ export function isAllowedPath(resolvedPath: string): boolean {
     /^[A-Za-z]:\\workspace\\.+$/,
   ];
 
-  return allowedPatterns.some(pattern => pattern.test(resolvedPath));
+  return allowedPatterns.some(pattern => pattern.test(normalizedPath));
 }
