@@ -4,6 +4,9 @@
 # This script is called by Claude Code after each tool execution.
 # It implements reliable event delivery with local logging and retry support.
 #
+# IMPORTANT: This script MUST always exit 0 to avoid blocking Claude Code.
+# All errors are handled gracefully and logged for later retry.
+#
 # Environment Variables (set by Claude Code):
 #   CLAUDE_SESSION_ID - The Claude Code session identifier
 #   TOOL_NAME         - Name of the executed tool
@@ -16,7 +19,8 @@
 #   CLAUDE_HOOK_SECRET       - Optional shared secret for authentication
 #   HOOK_TIMEOUT             - HTTP timeout in seconds (default: 5)
 
-set -e
+# Disable strict error mode - we handle errors gracefully to never block Claude Code
+set +e
 
 # Configuration with defaults
 API_URL="${CLAUDE_ORCHESTRATOR_API:-http://localhost:3001}"
