@@ -76,6 +76,51 @@ async function eventExists(
   return result.rows.length > 0;
 }
 
+/**
+ * Resolve a session identifier to its UUID (sessions.id).
+ * The incoming session value could be either:
+ * - A UUID (sessions.id) - used directly
+ * - A claude_session_id string - looked up to get the UUID
+ * Returns { id, claude_session_id } or null if not found.
+ */
+async function resolveSession(
+  db: Pool,
+  sessionIdentifier: string | undefined
+): Promise<{ id: string; claudeSessionId: string } | null> {
+  if (!sessionIdentifier) {
+    return null;
+  }
+
+  // Check if it's already a valid UUID (could be sessions.id)
+  if (isValidUuid(sessionIdentifier)) {
+    // Try to find by id first
+    const byId = await db.query(
+      `SELECT id, claude_session_id FROM sessions WHERE id = $1`,
+      [sessionIdentifier]
+    );
+    if (byId.rows.length > 0) {
+      return {
+        id: byId.rows[0].id,
+        claudeSessionId: byId.rows[0].claude_session_id
+      };
+    }
+  }
+
+  // Try to find by claude_session_id
+  const byClaudeId = await db.query(
+    `SELECT id, claude_session_id FROM sessions WHERE claude_session_id = $1`,
+    [sessionIdentifier]
+  );
+  if (byClaudeId.rows.length > 0) {
+    return {
+      id: byClaudeId.rows[0].id,
+      claudeSessionId: byClaudeId.rows[0].claude_session_id
+    };
+  }
+
+  return null;
+}
+
 export function createHookRouter(db: Pool) {
   const router = express.Router();
 
@@ -83,6 +128,16 @@ export function createHookRouter(db: Pool) {
   router.post('/tool-complete', async (req, res) => {
     try {
       const { eventId, eventType, session, tool, input, result, durationMs, timestamp } = req.body;
+
+      // Validate session is provided
+      if (!session) {
+        logger.warn('Tool complete hook called without session', { eventId, tool });
+        res.status(400).json({
+          error: 'Missing session identifier',
+          code: 'MISSING_SESSION'
+        });
+        return;
+      }
 
       // Validate eventId (required for idempotency)
       if (!eventId) {
@@ -97,6 +152,22 @@ export function createHookRouter(db: Pool) {
         res.status(400).json({
           error: 'Invalid eventId format',
           code: 'INVALID_EVENT_ID'
+        });
+        return;
+      }
+
+      // Resolve session identifier to UUID
+      const resolvedSession = await resolveSession(db, session);
+      if (!resolvedSession) {
+        logger.warn('Tool complete received for unknown session', {
+          eventId,
+          session,
+          tool
+        });
+        res.status(404).json({
+          status: 'session_not_found',
+          message: 'No session found with the provided identifier',
+          eventId
         });
         return;
       }
@@ -123,7 +194,7 @@ export function createHookRouter(db: Pool) {
         }
       }
 
-      // Insert the new event with client-provided or server-generated timestamp
+      // Insert the new event using resolved session UUID
       await db.query(
         `INSERT INTO command_logs (
           session_id, tool, input, result, status, duration_ms, timestamp,
@@ -131,7 +202,7 @@ export function createHookRouter(db: Pool) {
         )
         VALUES ($1, $2, $3, $4, 'completed', $5, $6, $7, 'delivered', 1, NOW())`,
         [
-          session,
+          resolvedSession.id,
           tool,
           input ? JSON.stringify(input) : null,
           result,
@@ -141,16 +212,17 @@ export function createHookRouter(db: Pool) {
         ]
       );
 
-      // Update session's last activity
+      // Update session's last activity using resolved UUID
       await db.query(
-        `UPDATE sessions SET updated_at = NOW() WHERE claude_session_id = $1`,
-        [session]
+        `UPDATE sessions SET updated_at = NOW() WHERE id = $1`,
+        [resolvedSession.id]
       );
 
       logger.info('Tool complete event recorded', {
         eventId,
         eventType,
-        session,
+        sessionId: resolvedSession.id,
+        claudeSessionId: resolvedSession.claudeSessionId,
         tool,
         durationMs,
         timestamp: eventTimestamp,
@@ -193,12 +265,39 @@ export function createHookRouter(db: Pool) {
     try {
       const { eventId, eventType, session, message, timestamp } = req.body;
 
+      // Validate session is provided
+      if (!session) {
+        logger.warn('Notification hook called without session', { eventId });
+        res.status(400).json({
+          error: 'Missing session identifier',
+          code: 'MISSING_SESSION'
+        });
+        return;
+      }
+
       // Validate eventId format if provided
       if (eventId && !isValidUuid(eventId)) {
         logger.warn('Invalid eventId format for notification', { eventId, session });
         res.status(400).json({
           error: 'Invalid eventId format',
           code: 'INVALID_EVENT_ID'
+        });
+        return;
+      }
+
+      // Resolve session identifier to UUID
+      const resolvedSession = await resolveSession(db, session);
+      if (!resolvedSession) {
+        logger.warn('Notification received for unknown session', {
+          eventId,
+          session,
+          messageLength: message?.length
+        });
+
+        res.status(404).json({
+          status: 'session_not_found',
+          message: 'No session found with the provided identifier',
+          eventId
         });
         return;
       }
@@ -224,37 +323,21 @@ export function createHookRouter(db: Pool) {
         }
       }
 
-      // Insert the notification with client-provided or server-generated timestamp
-      const insertResult = await db.query(
+      // Insert the notification using resolved session UUID
+      await db.query(
         `INSERT INTO session_messages (
           session_id, direction, content, source, created_at,
           event_id, delivery_status, delivery_attempts, last_delivery_attempt
         )
-        SELECT id, 'system', $2, 'claude-hook', $3, $4, 'delivered', 1, NOW()
-        FROM sessions WHERE claude_session_id = $1`,
-        [session, message, eventTimestamp, eventId || null]
+        VALUES ($1, 'system', $2, 'claude-hook', $3, $4, 'delivered', 1, NOW())`,
+        [resolvedSession.id, message, eventTimestamp, eventId || null]
       );
-
-      // Check if any rows were inserted (session existed)
-      if (insertResult.rowCount === 0) {
-        logger.warn('Notification received for unknown session', {
-          eventId,
-          session,
-          messageLength: message?.length
-        });
-
-        res.status(404).json({
-          status: 'session_not_found',
-          message: 'No session found with the provided claude_session_id',
-          eventId
-        });
-        return;
-      }
 
       logger.info('Notification event recorded', {
         eventId,
         eventType,
-        session,
+        sessionId: resolvedSession.id,
+        claudeSessionId: resolvedSession.claudeSessionId,
         messageLength: message?.length,
         timestamp: eventTimestamp,
         clientTimestamp: !!parsedTimestamp
