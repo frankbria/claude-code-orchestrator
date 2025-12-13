@@ -15,6 +15,53 @@ function isValidUuid(str: string | undefined): str is string {
 }
 
 /**
+ * Parse and validate a timestamp from client input.
+ * Accepts ISO8601 strings or Unix epoch (seconds or milliseconds).
+ * Returns a valid Date object or null if invalid/missing.
+ */
+function parseTimestamp(value: unknown): Date | null {
+  if (value === undefined || value === null) {
+    return null;
+  }
+
+  // Handle numeric timestamps (epoch)
+  if (typeof value === 'number') {
+    // Detect if seconds or milliseconds (timestamps before year 2001 in ms would be > 10^12)
+    const ms = value > 10000000000 ? value : value * 1000;
+    const date = new Date(ms);
+    if (!isNaN(date.getTime())) {
+      return date;
+    }
+    return null;
+  }
+
+  // Handle string timestamps
+  if (typeof value === 'string') {
+    // Try parsing as ISO8601
+    const date = new Date(value);
+    if (!isNaN(date.getTime())) {
+      // Sanity check: reject dates too far in past or future
+      const now = Date.now();
+      const oneYearMs = 365 * 24 * 60 * 60 * 1000;
+      if (date.getTime() > now - oneYearMs && date.getTime() < now + oneYearMs) {
+        return date;
+      }
+      logger.warn('Timestamp outside acceptable range', { value, parsed: date.toISOString() });
+      return null;
+    }
+
+    // Try parsing as numeric string (epoch)
+    const numValue = Number(value);
+    if (!isNaN(numValue)) {
+      return parseTimestamp(numValue);
+    }
+  }
+
+  logger.warn('Invalid timestamp format', { value, type: typeof value });
+  return null;
+}
+
+/**
  * Check if an event with the given event_id already exists
  */
 async function eventExists(
@@ -35,7 +82,7 @@ export function createHookRouter(db: Pool) {
   // Receives POST from Claude Code postToolUse hook
   router.post('/tool-complete', async (req, res) => {
     try {
-      const { eventId, session, tool, input, result, durationMs } = req.body;
+      const { eventId, eventType, session, tool, input, result, durationMs, timestamp } = req.body;
 
       // Validate eventId (required for idempotency)
       if (!eventId) {
@@ -53,6 +100,10 @@ export function createHookRouter(db: Pool) {
         });
         return;
       }
+
+      // Parse client-provided timestamp, fall back to current time
+      const parsedTimestamp = parseTimestamp(timestamp);
+      const eventTimestamp = parsedTimestamp ? parsedTimestamp.toISOString() : new Date().toISOString();
 
       // Check for duplicate event (idempotency)
       if (eventId) {
@@ -72,19 +123,20 @@ export function createHookRouter(db: Pool) {
         }
       }
 
-      // Insert the new event
+      // Insert the new event with client-provided or server-generated timestamp
       await db.query(
         `INSERT INTO command_logs (
           session_id, tool, input, result, status, duration_ms, timestamp,
           event_id, delivery_status, delivery_attempts, last_delivery_attempt
         )
-        VALUES ($1, $2, $3, $4, 'completed', $5, NOW(), $6, 'delivered', 1, NOW())`,
+        VALUES ($1, $2, $3, $4, 'completed', $5, $6, $7, 'delivered', 1, NOW())`,
         [
           session,
           tool,
           input ? JSON.stringify(input) : null,
           result,
           durationMs || null,
+          eventTimestamp,
           eventId || null
         ]
       );
@@ -97,9 +149,12 @@ export function createHookRouter(db: Pool) {
 
       logger.info('Tool complete event recorded', {
         eventId,
+        eventType,
         session,
         tool,
-        durationMs
+        durationMs,
+        timestamp: eventTimestamp,
+        clientTimestamp: !!parsedTimestamp
       });
 
       res.status(200).json({
@@ -136,7 +191,7 @@ export function createHookRouter(db: Pool) {
   // Receives notifications from Claude Code
   router.post('/notification', async (req, res) => {
     try {
-      const { eventId, session, message } = req.body;
+      const { eventId, eventType, session, message, timestamp } = req.body;
 
       // Validate eventId format if provided
       if (eventId && !isValidUuid(eventId)) {
@@ -147,6 +202,10 @@ export function createHookRouter(db: Pool) {
         });
         return;
       }
+
+      // Parse client-provided timestamp, fall back to current time
+      const parsedTimestamp = parseTimestamp(timestamp);
+      const eventTimestamp = parsedTimestamp ? parsedTimestamp.toISOString() : new Date().toISOString();
 
       // Check for duplicate event (idempotency)
       if (eventId) {
@@ -165,15 +224,15 @@ export function createHookRouter(db: Pool) {
         }
       }
 
-      // Insert the notification
+      // Insert the notification with client-provided or server-generated timestamp
       const insertResult = await db.query(
         `INSERT INTO session_messages (
-          session_id, direction, content, source,
+          session_id, direction, content, source, created_at,
           event_id, delivery_status, delivery_attempts, last_delivery_attempt
         )
-        SELECT id, 'system', $2, 'claude-hook', $3, 'delivered', 1, NOW()
+        SELECT id, 'system', $2, 'claude-hook', $3, $4, 'delivered', 1, NOW()
         FROM sessions WHERE claude_session_id = $1`,
-        [session, message, eventId || null]
+        [session, message, eventTimestamp, eventId || null]
       );
 
       // Check if any rows were inserted (session existed)
@@ -194,8 +253,11 @@ export function createHookRouter(db: Pool) {
 
       logger.info('Notification event recorded', {
         eventId,
+        eventType,
         session,
-        messageLength: message?.length
+        messageLength: message?.length,
+        timestamp: eventTimestamp,
+        clientTimestamp: !!parsedTimestamp
       });
 
       res.status(200).json({
