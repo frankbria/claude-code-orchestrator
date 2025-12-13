@@ -18,7 +18,7 @@
 
 import path from 'path';
 import fs from 'fs/promises';
-import { execFile, execSync } from 'child_process';
+import { execFile } from 'child_process';
 import { promisify } from 'util';
 import crypto from 'crypto';
 import { validateWorkspacePath, isAllowedPath, getSecureBaseDir } from '../utils/pathValidation';
@@ -124,13 +124,17 @@ export class WorkspaceManager {
     try {
       // Use df command to get disk space info
       // -k outputs in 1K blocks for consistent parsing
-      const output = execSync(`df -k "${this.baseDir}" 2>/dev/null | tail -1`, {
+      // SECURITY: Use execFileAsync with separate arguments to prevent shell injection
+      const { stdout } = await execFileAsync('df', ['-k', this.baseDir], {
         encoding: 'utf8',
         timeout: 5000,
       });
 
       // Parse df output: Filesystem 1K-blocks Used Available Use% Mounted
-      const parts = output.trim().split(/\s+/);
+      // Get the last line (skip header line)
+      const lines = stdout.trim().split('\n');
+      const lastLine = lines[lines.length - 1];
+      const parts = lastLine.trim().split(/\s+/);
 
       if (parts.length < 5) {
         throw new Error('Unexpected df output format');
