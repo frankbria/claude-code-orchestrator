@@ -159,14 +159,16 @@ export function createHookRouter(db: Pool) {
       // Resolve session identifier to UUID
       const resolvedSession = await resolveSession(db, session);
       if (!resolvedSession) {
+        // Return 200 to acknowledge and prevent retry loops, but log warning
         logger.warn('Tool complete received for unknown session', {
           eventId,
           session,
           tool
         });
-        res.status(404).json({
+        res.status(200).json({
           status: 'session_not_found',
-          message: 'No session found with the provided identifier',
+          acknowledged: true,
+          message: 'No session found with the provided identifier - event acknowledged but not stored',
           eventId
         });
         return;
@@ -288,15 +290,17 @@ export function createHookRouter(db: Pool) {
       // Resolve session identifier to UUID
       const resolvedSession = await resolveSession(db, session);
       if (!resolvedSession) {
+        // Return 200 to acknowledge and prevent retry loops, but log warning
         logger.warn('Notification received for unknown session', {
           eventId,
           session,
           messageLength: message?.length
         });
 
-        res.status(404).json({
+        res.status(200).json({
           status: 'session_not_found',
-          message: 'No session found with the provided identifier',
+          acknowledged: true,
+          message: 'No session found with the provided identifier - event acknowledged but not stored',
           eventId
         });
         return;
