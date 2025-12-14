@@ -22,6 +22,10 @@ module.exports = {
   verbose: true,
   testTimeout: 30000, // 30 seconds default timeout for integration tests
   moduleFileExtensions: ['ts', 'tsx', 'js', 'jsx', 'json', 'node'],
+  // Map ESM uuid to our mock
+  moduleNameMapper: {
+    '^uuid$': '<rootDir>/src/__mocks__/uuid.ts',
+  },
   globals: {
     'ts-jest': {
       tsconfig: {

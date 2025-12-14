@@ -1711,23 +1711,79 @@ async cloneGitHubRepo(repo: string): Promise<string> {
   if (!/^[\w-]+\/[\w.-]+$/.test(repo)) {
     throw new Error('Invalid repository format');
   }
-  
+
   // Create isolated directory
   const workspaceId = uuidv4();
   const basePath = process.env.WORKSPACE_BASE || '/tmp/claude-workspaces';
   const targetPath = path.join(basePath, workspaceId);
-  
+
   // Ensure we're not escaping the base path
   if (!targetPath.startsWith(basePath)) {
     throw new Error('Invalid workspace path');
   }
-  
+
   await fs.mkdir(targetPath, { recursive: true });
   execSync(`gh repo clone ${repo} ${targetPath}`, { timeout: 60000 });
-  
+
   return targetPath;
 }
 ```
+
+### Secret Scrubbing
+
+Tool results and inputs are automatically scrubbed to prevent sensitive data from being stored in the database. This protects against accidental exposure of:
+
+- **API Keys**: OpenAI (`sk-...`), Anthropic (`sk-ant-...`), GitHub (`ghp_...`), AWS (`AKIA...`), Google (`AIza...`), Stripe, SendGrid, etc.
+- **Tokens**: Slack (`xoxb-...`), npm, PyPI, Docker Hub, JWT, Bearer tokens
+- **Credentials**: Passwords in environment variables, database connection strings, Basic auth headers
+- **Private Keys**: RSA, EC, OpenSSH, PGP private key blocks
+
+**How it works:**
+
+1. Before database storage, all string fields are scanned against a comprehensive pattern library
+2. Matched secrets are replaced with `***REDACTED***`
+3. Detected secret types are logged for audit purposes (without exposing values)
+4. The original data is never persisted
+
+**Configuration:**
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `SCRUB_SECRETS` | boolean | `true` | Enable/disable secret scrubbing |
+| `ENABLE_ENCRYPTION_AT_REST` | boolean | `false` | Additional AES-256-GCM encryption |
+| `ENCRYPTION_KEY` | string | (none) | 64-char hex key for encryption |
+
+**Audit Logging:**
+
+When secrets are detected and scrubbed:
+- Secret types are logged to both `secret-scrubber` and `security` categories
+- Logs include session ID, tool name, and event ID for correlation
+- Actual secret values are never logged
+
+**Example scrubbing:**
+
+```
+Input:  "DATABASE_URL=postgresql://user:secretpass@localhost/db"
+Output: "DATABASE_URL=postgresql://user:***REDACTED***@localhost/db"
+```
+
+**Supported Patterns:**
+
+| Category | Examples |
+|----------|----------|
+| OpenAI | `sk-...`, `sk-proj-...` |
+| Anthropic | `sk-ant-...` |
+| Slack | `xoxb-...`, `xoxp-...`, webhook URLs |
+| GitHub | `ghp_...`, `gho_...`, `ghs_...` |
+| AWS | `AKIA...` (access key ID) |
+| Google | `AIza...`, `ya29....` (OAuth) |
+| Stripe | `sk_live_...`, `pk_test_...` |
+| Database URLs | PostgreSQL, MongoDB, MySQL, Redis |
+| Private Keys | RSA, EC, OpenSSH, PGP blocks |
+| Environment Variables | `PASSWORD=...`, `SECRET=...`, `TOKEN=...` |
+| JSON | `"password": "..."`, `"api_key": "..."` |
+| Auth Headers | `Bearer ...`, `Basic ...` |
+| JWT | `eyJ...` (three-part tokens) |
 
 ---
 
