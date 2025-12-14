@@ -350,11 +350,8 @@ const SECRET_PATTERNS: SecretPattern[] = [
     replacement: (_match: string, prefix: string) => `${prefix} ${REDACTED}`,
   },
 
-  // JWT tokens (three base64 parts separated by dots)
-  {
-    name: 'jwt_token',
-    pattern: /\beyJ[a-zA-Z0-9_-]*\.eyJ[a-zA-Z0-9_-]*\.[a-zA-Z0-9_-]+\b/g,
-  },
+  // Note: JWT tokens are defined at the top of this array (lines ~94-98) to ensure
+  // they are matched before generic patterns like env_secret.
 
   // High-entropy strings that look like secrets (32+ chars, alphanumeric)
   // This is a catch-all and may have false positives, so it's last
