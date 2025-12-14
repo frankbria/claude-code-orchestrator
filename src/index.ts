@@ -1,14 +1,35 @@
 // src/index.ts
 import express from 'express';
 import { Pool } from 'pg';
+import cron from 'node-cron';
+import * as fs from 'fs/promises';
+import { exec } from 'child_process';
+import { promisify } from 'util';
 import { createRouter } from './api/routes';
+
+const execAsync = promisify(exec);
+
+// Check if fs.statfs is available (Node.js >= 18.15.0)
+const hasStatfs = typeof fs.statfs === 'function';
 import { createHookRouter } from './api/hooks';
+import { createHealthRouter, countActiveSessions } from './api/health';
 import { createApiKeyAuth, createHookAuth, createStrictHookAuth, validateProductionSecrets, isProduction } from './middleware/auth';
+import { metricsMiddleware } from './middleware/metrics';
 import { startRetryDaemon, stopRetryDaemon, getRetryDaemon } from './services/retryDaemon';
 import { startCleanupJob, stopCleanupJob, getCleanupJob } from './services/cleanup-job';
 import { WorkspaceManager } from './services/workspace';
 import { getCleanupConfig, validateCleanupConfig, isTarAvailable } from './config/cleanup';
 import { createLogger } from './utils/logger';
+import {
+  sessionsActive,
+  diskSpaceAvailableBytes,
+  dbConnectionsActive,
+  dbConnectionsIdle,
+  dbConnectionsTotal,
+  workspacesCount,
+  retryDaemonPending,
+  retryDaemonDeadLetter,
+} from './metrics';
 
 // Load environment variables
 import 'dotenv/config';
@@ -17,6 +38,9 @@ const logger = createLogger('server');
 
 const app = express();
 app.use(express.json());
+
+// Add metrics middleware early to capture all request latencies
+app.use(metricsMiddleware);
 
 const db = new Pool({
   connectionString: process.env.DATABASE_URL
@@ -145,6 +169,9 @@ app.get('/health', async (req, res) => {
 // The strictAuth middleware is used for sensitive endpoints like /metrics that expose operational data
 app.use('/api/hooks', hookAuth, createHookRouter(db, { strictAuth: strictHookAuth }));
 
+// Health and Prometheus metrics endpoints (protected by strict auth for /metrics)
+app.use('/api', createHealthRouter(db, { strictAuth: strictHookAuth }));
+
 // All other API routes require API key authentication
 app.use('/api', apiKeyAuth, createRouter(db));
 
@@ -191,11 +218,129 @@ const server = app.listen(port, () => {
   } else {
     logger.info('Scheduled cleanup job is disabled');
   }
+
+  // Start the metrics collection cron job (every minute)
+  startMetricsCollection();
 });
+
+// Scheduled metrics collection task
+let metricsTask: ReturnType<typeof cron.schedule> | null = null;
+
+/**
+ * Update Prometheus gauge metrics with current system state.
+ * Called every minute by the cron job.
+ */
+async function updateMetrics(): Promise<void> {
+  try {
+    // Update active sessions count
+    const activeCount = await countActiveSessions(db);
+    sessionsActive.set(activeCount);
+
+    // Update database pool metrics
+    dbConnectionsTotal.set(db.totalCount);
+    dbConnectionsIdle.set(db.idleCount);
+    dbConnectionsActive.set(db.totalCount - db.idleCount);
+
+    // Update disk space metrics
+    const cleanupConfig = getCleanupConfig();
+    const workspaceBase = cleanupConfig.workspaceBase || '/tmp/claude-workspaces';
+    try {
+      await fs.mkdir(workspaceBase, { recursive: true });
+
+      // Get disk space using fs.statfs or df fallback
+      let availableBytes: number | null = null;
+      if (hasStatfs) {
+        const stats = await fs.statfs(workspaceBase);
+        availableBytes = stats.bavail * stats.bsize;
+      } else {
+        // Fallback to df command for older Node.js versions
+        try {
+          const { stdout } = await execAsync(`df -k "${workspaceBase}"`);
+          const lines = stdout.trim().split('\n');
+          if (lines.length >= 2) {
+            const parts = lines[1].split(/\s+/);
+            const availableKB = parseInt(parts[3], 10);
+            if (!isNaN(availableKB)) {
+              availableBytes = availableKB * 1024; // KB to bytes
+            }
+          }
+        } catch (dfError) {
+          logger.warn('Failed to get disk space via df fallback', {
+            error: dfError instanceof Error ? dfError.message : String(dfError),
+          });
+        }
+      }
+
+      if (availableBytes !== null) {
+        diskSpaceAvailableBytes.set(availableBytes);
+      }
+
+      // Count workspaces
+      const entries = await fs.readdir(workspaceBase, { withFileTypes: true });
+      const dirCount = entries.filter((e) => e.isDirectory()).length;
+      workspacesCount.set(dirCount);
+    } catch (error) {
+      logger.warn('Failed to collect disk metrics', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+
+    // Update retry daemon metrics
+    const daemon = getRetryDaemon();
+    if (daemon) {
+      try {
+        const daemonStats = await daemon.getStats();
+        retryDaemonPending.set(daemonStats.pendingRetries);
+        retryDaemonDeadLetter.set(daemonStats.deadLetterCount);
+      } catch (error) {
+        logger.warn('Failed to collect retry daemon metrics', {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+  } catch (error) {
+    logger.error('Failed to update metrics', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
+/**
+ * Start the metrics collection cron job.
+ */
+function startMetricsCollection(): void {
+  // Run immediately on startup
+  updateMetrics().catch((err) => {
+    logger.error('Initial metrics collection failed', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  });
+
+  // Schedule to run every minute
+  metricsTask = cron.schedule('* * * * *', async () => {
+    await updateMetrics();
+  });
+
+  logger.info('Metrics collection started (every minute)');
+}
+
+/**
+ * Stop the metrics collection cron job.
+ */
+function stopMetricsCollection(): void {
+  if (metricsTask) {
+    metricsTask.stop();
+    metricsTask = null;
+    logger.info('Metrics collection stopped');
+  }
+}
 
 // Graceful shutdown handling
 const shutdown = async (signal: string) => {
   logger.info(`Received ${signal}, shutting down gracefully...`);
+
+  // Stop the metrics collection
+  stopMetricsCollection();
 
   // Stop the retry daemon
   stopRetryDaemon();

@@ -9,6 +9,7 @@ import {
 } from '../db/queries';
 import { withOptimisticLockRetry, retryMetrics } from '../db/retry';
 import { scrubSecrets, scrubObjectSecrets, logScrubbedSecrets, isScrubbingEnabled } from '../services/secretScrubber';
+import { hooksReceivedTotal, hookDeliveryLatency } from '../metrics';
 
 /**
  * Options for configuring the hook router
@@ -309,6 +310,18 @@ export function createHookRouter(db: Pool, options: HookRouterOptions = {}) {
         });
       }
 
+      // Record Prometheus metrics for successful hook delivery
+      hooksReceivedTotal.labels({ tool: tool || 'unknown', status: 'completed' }).inc();
+
+      // Track delivery latency if client timestamp was provided
+      if (parsedTimestamp) {
+        const deliveryLatency = Date.now() - parsedTimestamp.getTime();
+        if (deliveryLatency >= 0 && deliveryLatency < 60000) {
+          // Only record reasonable latencies (0-60s)
+          hookDeliveryLatency.labels({ tool: tool || 'unknown' }).observe(deliveryLatency);
+        }
+      }
+
       logger.info('Tool complete event recorded', {
         eventId,
         eventType,
@@ -340,6 +353,9 @@ export function createHookRouter(db: Pool, options: HookRouterOptions = {}) {
         });
         return;
       }
+
+      // Record error metric
+      hooksReceivedTotal.labels({ tool: req.body.tool || 'unknown', status: 'error' }).inc();
 
       logger.error('Failed to process tool-complete hook', {
         error: error instanceof Error ? error.message : String(error),
@@ -453,6 +469,18 @@ export function createHookRouter(db: Pool, options: HookRouterOptions = {}) {
         ]
       );
 
+      // Record Prometheus metrics for successful notification delivery
+      hooksReceivedTotal.labels({ tool: 'notification', status: 'completed' }).inc();
+
+      // Track delivery latency if client timestamp was provided
+      if (parsedTimestamp) {
+        const deliveryLatency = Date.now() - parsedTimestamp.getTime();
+        if (deliveryLatency >= 0 && deliveryLatency < 60000) {
+          // Only record reasonable latencies (0-60s)
+          hookDeliveryLatency.labels({ tool: 'notification' }).observe(deliveryLatency);
+        }
+      }
+
       logger.info('Notification event recorded', {
         eventId,
         eventType,
@@ -483,6 +511,9 @@ export function createHookRouter(db: Pool, options: HookRouterOptions = {}) {
         });
         return;
       }
+
+      // Record error metric
+      hooksReceivedTotal.labels({ tool: 'notification', status: 'error' }).inc();
 
       logger.error('Failed to process notification hook', {
         error: error instanceof Error ? error.message : String(error),
