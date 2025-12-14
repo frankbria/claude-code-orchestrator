@@ -28,8 +28,8 @@ const securityLogger = createLogger('security');
  * Result of scrubbing operation
  */
 export interface ScrubResult {
-  /** The scrubbed text with secrets redacted */
-  scrubbed: string;
+  /** The scrubbed text with secrets redacted, or null if input was null/undefined */
+  scrubbed: string | null;
   /** List of detected secret types (for audit logging) */
   foundSecrets: string[];
   /** Count of total secrets found */
@@ -451,10 +451,10 @@ export function isScrubbingEnabled(): boolean {
  * ```
  */
 export function scrubSecrets(text: string | null | undefined): ScrubResult {
-  // Handle null/undefined/empty inputs gracefully
+  // Handle null/undefined inputs gracefully
   if (text === null || text === undefined) {
     return {
-      scrubbed: text as unknown as string,
+      scrubbed: null,
       foundSecrets: [],
       secretCount: 0,
     };

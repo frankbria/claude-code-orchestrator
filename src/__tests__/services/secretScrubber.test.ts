@@ -381,7 +381,8 @@ MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQC
     test('should handle undefined input', () => {
       const result = scrubSecrets(undefined);
 
-      expect(result.scrubbed).toBe(undefined);
+      // undefined inputs are normalized to null for consistency
+      expect(result.scrubbed).toBe(null);
       expect(result.foundSecrets).toEqual([]);
       expect(result.secretCount).toBe(0);
     });
