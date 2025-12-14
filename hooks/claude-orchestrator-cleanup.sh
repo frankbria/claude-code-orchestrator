@@ -12,7 +12,8 @@
 #
 # Environment Variables (configuration):
 #   CLAUDE_ORCHESTRATOR_API  - API endpoint (default: http://localhost:3001)
-#   CLAUDE_HOOK_SECRET       - Optional shared secret for authentication
+#   CLAUDE_HOOK_SECRET       - Optional shared secret for hook authentication
+#   ORCHESTRATOR_API_KEY     - Optional API key for session endpoint authentication
 #   ORCHESTRATOR_SESSION_ID  - UUID of the orchestrator session
 
 # Disable strict error mode - we handle errors gracefully to never block Claude Code
@@ -21,6 +22,7 @@ set +e
 # Configuration with defaults
 API_URL="${CLAUDE_ORCHESTRATOR_API:-http://localhost:3001}"
 HOOK_SECRET="${CLAUDE_HOOK_SECRET:-}"
+API_KEY="${ORCHESTRATOR_API_KEY:-}"
 ORCHESTRATOR_SESSION_ID="${ORCHESTRATOR_SESSION_ID:-}"
 
 # Stop the heartbeat background process
@@ -61,6 +63,10 @@ notify_completion() {
 
     if [ -n "$HOOK_SECRET" ]; then
         curl_args+=(-H "x-hook-secret: $HOOK_SECRET")
+    fi
+
+    if [ -n "$API_KEY" ]; then
+        curl_args+=(-H "x-api-key: $API_KEY")
     fi
 
     curl_args+=(-d "{\"status\":\"$status\"}")
