@@ -244,11 +244,11 @@ export function createHookRouter(db: Pool) {
         [
           resolvedSession.id,
           tool,
-          scrubbedInput ? JSON.stringify(scrubbedInput) : null,
-          scrubbedResult,
-          durationMs || null,
+          scrubbedInput !== null && scrubbedInput !== undefined ? JSON.stringify(scrubbedInput) : null,
+          scrubbedResult !== null && scrubbedResult !== undefined ? scrubbedResult : null,
+          durationMs !== null && durationMs !== undefined ? durationMs : null,
           eventTimestamp,
-          eventId || null
+          eventId !== null && eventId !== undefined ? eventId : null
         ]
       );
 
@@ -389,7 +389,12 @@ export function createHookRouter(db: Pool) {
           event_id, delivery_status, delivery_attempts, last_delivery_attempt
         )
         VALUES ($1, 'system', $2, 'claude-hook', $3, $4, 'delivered', 1, NOW())`,
-        [resolvedSession.id, scrubbedMessage, eventTimestamp, eventId || null]
+        [
+          resolvedSession.id,
+          scrubbedMessage !== null && scrubbedMessage !== undefined ? scrubbedMessage : null,
+          eventTimestamp,
+          eventId !== null && eventId !== undefined ? eventId : null
+        ]
       );
 
       logger.info('Notification event recorded', {
