@@ -1,5 +1,5 @@
 // src/api/hooks.ts
-import express from 'express';
+import express, { RequestHandler } from 'express';
 import { Pool } from 'pg';
 import { createLogger } from '../utils/logger';
 import { validate as uuidValidate } from 'uuid';
@@ -9,6 +9,18 @@ import {
 } from '../db/queries';
 import { withOptimisticLockRetry, retryMetrics } from '../db/retry';
 import { scrubSecrets, scrubObjectSecrets, logScrubbedSecrets, isScrubbingEnabled } from '../services/secretScrubber';
+
+/**
+ * Options for configuring the hook router
+ */
+export interface HookRouterOptions {
+  /**
+   * Middleware to apply to sensitive endpoints (like /metrics) that require
+   * stricter authentication. If not provided, these endpoints will be
+   * protected by the same auth as other hook endpoints.
+   */
+  strictAuth?: RequestHandler;
+}
 
 const logger = createLogger('hooks');
 
@@ -138,8 +150,9 @@ async function resolveSession(
   return null;
 }
 
-export function createHookRouter(db: Pool) {
+export function createHookRouter(db: Pool, options: HookRouterOptions = {}) {
   const router = express.Router();
+  const { strictAuth } = options;
 
   // Receives POST from Claude Code postToolUse hook
   router.post('/tool-complete', async (req, res) => {
@@ -503,7 +516,9 @@ export function createHookRouter(db: Pool) {
   });
 
   // Metrics endpoint for monitoring retry behavior
-  router.get('/metrics', async (_req, res) => {
+  // This endpoint exposes operational data and requires stricter authentication
+  // to prevent information leakage in misconfigured environments
+  const metricsHandler: RequestHandler = async (_req, res) => {
     const metrics = retryMetrics.getMetrics();
     res.json({
       retryMetrics: {
@@ -524,7 +539,14 @@ export function createHookRouter(db: Pool) {
       },
       timestamp: new Date().toISOString()
     });
-  });
+  };
+
+  // Apply strict auth middleware if provided, otherwise use default route auth
+  if (strictAuth) {
+    router.get('/metrics', strictAuth, metricsHandler);
+  } else {
+    router.get('/metrics', metricsHandler);
+  }
 
   return router;
 }
