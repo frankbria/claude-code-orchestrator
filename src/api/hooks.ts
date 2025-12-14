@@ -3,6 +3,7 @@ import express from 'express';
 import { Pool } from 'pg';
 import { createLogger } from '../utils/logger';
 import { validate as uuidValidate } from 'uuid';
+import { scrubSecrets, scrubObjectSecrets, logScrubbedSecrets, isScrubbingEnabled } from '../services/secretScrubber';
 
 const logger = createLogger('hooks');
 
@@ -129,6 +130,42 @@ export function createHookRouter(db: Pool) {
     try {
       const { eventId, eventType, session, tool, input, result, durationMs, timestamp } = req.body;
 
+      // Scrub secrets from input and result before any processing
+      let scrubbedResult = result;
+      let scrubbedInput = input;
+      const allFoundSecrets: string[] = [];
+
+      if (isScrubbingEnabled()) {
+        // Scrub result (always a string or null)
+        if (result !== null && result !== undefined) {
+          const resultScrub = scrubSecrets(String(result));
+          scrubbedResult = resultScrub.scrubbed;
+          allFoundSecrets.push(...resultScrub.foundSecrets);
+        }
+
+        // Scrub input (can be string or object)
+        if (input !== null && input !== undefined) {
+          if (typeof input === 'string') {
+            const inputScrub = scrubSecrets(input);
+            scrubbedInput = inputScrub.scrubbed;
+            allFoundSecrets.push(...inputScrub.foundSecrets);
+          } else if (typeof input === 'object') {
+            const inputScrub = scrubObjectSecrets(input);
+            scrubbedInput = inputScrub.scrubbed;
+            allFoundSecrets.push(...inputScrub.foundSecrets);
+          }
+        }
+
+        // Log scrubbed secrets for audit trail
+        if (allFoundSecrets.length > 0) {
+          logScrubbedSecrets([...new Set(allFoundSecrets)], {
+            sessionId: session,
+            tool,
+            eventId,
+          });
+        }
+      }
+
       // Validate session is provided
       if (!session) {
         logger.warn('Tool complete hook called without session', { eventId, tool });
@@ -197,6 +234,7 @@ export function createHookRouter(db: Pool) {
       }
 
       // Insert the new event using resolved session UUID
+      // Note: Using scrubbed values to prevent secret exposure in database
       await db.query(
         `INSERT INTO command_logs (
           session_id, tool, input, result, status, duration_ms, timestamp,
@@ -206,8 +244,8 @@ export function createHookRouter(db: Pool) {
         [
           resolvedSession.id,
           tool,
-          input ? JSON.stringify(input) : null,
-          result,
+          scrubbedInput ? JSON.stringify(scrubbedInput) : null,
+          scrubbedResult,
           durationMs || null,
           eventTimestamp,
           eventId || null
@@ -228,7 +266,8 @@ export function createHookRouter(db: Pool) {
         tool,
         durationMs,
         timestamp: eventTimestamp,
-        clientTimestamp: !!parsedTimestamp
+        clientTimestamp: !!parsedTimestamp,
+        secretsScrubbed: allFoundSecrets.length > 0
       });
 
       res.status(200).json({
@@ -266,6 +305,21 @@ export function createHookRouter(db: Pool) {
   router.post('/notification', async (req, res) => {
     try {
       const { eventId, eventType, session, message, timestamp } = req.body;
+
+      // Scrub secrets from message content before any processing
+      let scrubbedMessage = message;
+      if (isScrubbingEnabled() && message !== null && message !== undefined) {
+        const messageScrub = scrubSecrets(String(message));
+        scrubbedMessage = messageScrub.scrubbed;
+
+        // Log scrubbed secrets for audit trail
+        if (messageScrub.foundSecrets.length > 0) {
+          logScrubbedSecrets(messageScrub.foundSecrets, {
+            sessionId: session,
+            eventId,
+          });
+        }
+      }
 
       // Validate session is provided
       if (!session) {
@@ -328,13 +382,14 @@ export function createHookRouter(db: Pool) {
       }
 
       // Insert the notification using resolved session UUID
+      // Note: Using scrubbed message to prevent secret exposure in database
       await db.query(
         `INSERT INTO session_messages (
           session_id, direction, content, source, created_at,
           event_id, delivery_status, delivery_attempts, last_delivery_attempt
         )
         VALUES ($1, 'system', $2, 'claude-hook', $3, $4, 'delivered', 1, NOW())`,
-        [resolvedSession.id, message, eventTimestamp, eventId || null]
+        [resolvedSession.id, scrubbedMessage, eventTimestamp, eventId || null]
       );
 
       logger.info('Notification event recorded', {
@@ -342,9 +397,10 @@ export function createHookRouter(db: Pool) {
         eventType,
         sessionId: resolvedSession.id,
         claudeSessionId: resolvedSession.claudeSessionId,
-        messageLength: message?.length,
+        messageLength: scrubbedMessage?.length,
         timestamp: eventTimestamp,
-        clientTimestamp: !!parsedTimestamp
+        clientTimestamp: !!parsedTimestamp,
+        secretsScrubbed: scrubbedMessage !== message
       });
 
       res.status(200).json({
