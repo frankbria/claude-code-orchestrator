@@ -12,7 +12,6 @@ import {
   VersionConflictError,
   SessionStatus,
   SessionUpdatePayload,
-  updateSessionHeartbeat,
   mergeSessionMetadata,
 } from '../db/queries';
 import { updateSessionWithRetry } from '../db/retry';
@@ -282,7 +281,8 @@ export function createRouter(db: Pool) {
       }
 
       // Merge metadata if provided (does not overwrite existing keys unless explicitly set)
-      if (metadata && typeof metadata === 'object') {
+      // Strict validation: must be a plain object (not null, not array)
+      if (metadata !== null && typeof metadata === 'object' && !Array.isArray(metadata)) {
         try {
           await mergeSessionMetadata(db, req.params.id, metadata);
           apiLogger.info('Session metadata merged', {
@@ -367,46 +367,9 @@ export function createRouter(db: Pool) {
     res.json({ status: 'logged' });
   });
 
-  // Heartbeat endpoint - updates session timestamp to signal liveness
-  // Called periodically by Claude Code hook scripts to indicate the session is alive
-  router.post('/sessions/:id/heartbeat', async (req, res) => {
-    const requestId = (req as any).id;
-
-    try {
-      const updated = await updateSessionHeartbeat(db, req.params.id);
-
-      if (!updated) {
-        apiLogger.warn('Heartbeat received for unknown session', {
-          requestId,
-          sessionId: req.params.id,
-        });
-        res.status(404).json({
-          error: 'Session not found',
-          code: 'SESSION_NOT_FOUND'
-        });
-        return;
-      }
-
-      // Only log at info level for active debugging - normally heartbeats are silent
-      // apiLogger.info('Session heartbeat received', {
-      //   requestId,
-      //   sessionId: req.params.id,
-      //   timestamp: new Date().toISOString(),
-      // });
-
-      res.status(200).json({ status: 'ok' });
-    } catch (error) {
-      apiLogger.error('Heartbeat processing error', {
-        requestId,
-        sessionId: req.params.id,
-        error: (error as Error).message,
-      });
-      res.status(500).json({
-        error: 'Internal server error',
-        code: 'HEARTBEAT_ERROR'
-      });
-    }
-  });
+  // NOTE: Heartbeat endpoint moved to hooks.ts (POST /api/hooks/sessions/:id/heartbeat)
+  // This allows Claude Code hooks to authenticate via x-hook-secret header
+  // rather than requiring API key authentication
 
   // ============================================
   // Admin API Key Management Endpoints

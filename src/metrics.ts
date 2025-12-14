@@ -200,7 +200,8 @@ export const sessionMonitorErrors = new Counter({
 });
 
 /**
- * Gauge for heartbeat endpoint requests
+ * Counter for heartbeat endpoint requests
+ * Labels: status ('success', 'not_found', 'error')
  */
 export const heartbeatRequestsTotal = new Counter({
   name: 'heartbeat_requests_total',

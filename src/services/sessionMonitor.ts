@@ -44,12 +44,49 @@ export interface SessionMonitorConfig {
   enableLivenessCheck: boolean;
 }
 
+const DEFAULT_STALE_TIMEOUT_MINUTES = 2;
+
+/**
+ * Parse and validate stale timeout minutes from environment variable
+ * Returns default value if the env var is missing, invalid, or out of range
+ */
+function parseStaleTimeoutMinutes(envValue: string | undefined): number {
+  if (!envValue) {
+    return DEFAULT_STALE_TIMEOUT_MINUTES;
+  }
+
+  const parsed = parseInt(envValue, 10);
+
+  // Validate: must be a finite positive integer
+  if (!Number.isFinite(parsed) || parsed < 1) {
+    logger.warn('Invalid SESSION_STALE_TIMEOUT_MINUTES value, using default', {
+      envValue,
+      parsedValue: parsed,
+      defaultValue: DEFAULT_STALE_TIMEOUT_MINUTES,
+    });
+    return DEFAULT_STALE_TIMEOUT_MINUTES;
+  }
+
+  // Sanity check: cap at a reasonable maximum (24 hours = 1440 minutes)
+  const MAX_TIMEOUT_MINUTES = 1440;
+  if (parsed > MAX_TIMEOUT_MINUTES) {
+    logger.warn('SESSION_STALE_TIMEOUT_MINUTES exceeds maximum, capping', {
+      envValue,
+      parsedValue: parsed,
+      maxValue: MAX_TIMEOUT_MINUTES,
+    });
+    return MAX_TIMEOUT_MINUTES;
+  }
+
+  return parsed;
+}
+
 /**
  * Get session monitor configuration from environment variables
  */
 export function getSessionMonitorConfig(): SessionMonitorConfig {
   return {
-    staleTimeoutMinutes: parseInt(process.env.SESSION_STALE_TIMEOUT_MINUTES || '2', 10),
+    staleTimeoutMinutes: parseStaleTimeoutMinutes(process.env.SESSION_STALE_TIMEOUT_MINUTES),
     staleCronExpression: process.env.SESSION_STALE_CRON || '* * * * *',
     livenessCronExpression: process.env.SESSION_LIVENESS_CRON || '*/5 * * * *',
     enableStaleDetection: process.env.ENABLE_STALE_DETECTION !== 'false',

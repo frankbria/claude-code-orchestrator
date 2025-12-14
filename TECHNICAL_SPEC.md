@@ -513,8 +513,13 @@ POST /api/sessions/:id/heartbeat
 
 **Implementation Notes**:
 - Updates both `updated_at` and stores `lastHeartbeat` timestamp in session metadata
+- The heartbeat endpoint **must** set `metadata.lastHeartbeat` to the current timestamp
 - Should be called every 30 seconds by hook scripts
-- Sessions without heartbeat for 2+ minutes are marked as 'stale' by the session monitor
+- **Staleness Detection**: Sessions are marked 'stale' by the session monitor when
+  `metadata.lastHeartbeat` (parsed as timestamptz) is older than 2 minutes. If
+  `lastHeartbeat` is missing or invalid, `updated_at` is used as a fallback.
+- Note: The session monitor checks `metadata.lastHeartbeat` specifically to avoid
+  false positives from unrelated updates that might touch `updated_at`
 
 ---
 

@@ -199,23 +199,32 @@ This allows different projects to POST to different orchestrator instances.
 
 ## API Endpoints
 
-### Sessions
+### Sessions (API Key Authentication Required)
+All session endpoints require API key authentication via the `x-api-key` header:
 - `POST /api/sessions` - Create new session
 - `GET /api/sessions` - List all sessions
 - `GET /api/sessions/:id` - Get session details
 - `PATCH /api/sessions/:id` - Update session (status, claude_session_id, metadata)
-- `POST /api/sessions/:id/heartbeat` - Signal session liveness
+- `POST /api/sessions/:id/heartbeat` - Signal session liveness (API key auth)
 
-### Messages
+### Messages (API Key Authentication Required)
 - `GET /api/sessions/:id/messages` - Get conversation history
 - `POST /api/sessions/:id/messages` - Add message (for dashboard intervention)
 
-### Command Logs
+### Command Logs (API Key Authentication Required)
 - `GET /api/sessions/:id/logs?limit=50` - Get tool execution history
 
-### Hooks (Called by Claude Code)
+### Hooks (Hook Secret Authentication)
+Hook endpoints use a separate authentication mechanism via the `x-hook-secret` header.
+These are called by Claude Code hook scripts:
 - `POST /api/hooks/tool-complete` - Log tool execution
 - `POST /api/hooks/notification` - Log Claude Code notification
+- `POST /api/hooks/sessions/:id/heartbeat` - Signal session liveness (hook auth)
+
+**Authentication Configuration:**
+- API key: Set `ORCHESTRATOR_API_KEY` environment variable in hook scripts
+- Hook secret: Set `HOOK_SECRET` environment variable (must match server's `HOOK_SECRET`)
+- Hook scripts should include error handling for 401/403 responses to surface auth failures
 
 ### Session Status Values
 - `active` - Session is running and receiving heartbeats

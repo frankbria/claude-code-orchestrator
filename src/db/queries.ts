@@ -637,8 +637,11 @@ export async function updateSessionStatus(
 }
 
 /**
- * Get active sessions that haven't been updated within the specified interval
+ * Get active sessions that haven't received a heartbeat within the specified interval
  * Used by the session monitor to detect stale sessions
+ *
+ * Uses heartbeat-based liveness: compares metadata->>'lastHeartbeat' (parsed as timestamptz)
+ * against NOW() - interval, falling back to updated_at when lastHeartbeat is missing or invalid.
  */
 export async function getInactiveSessions(
   db: Pool,
@@ -649,8 +652,14 @@ export async function getInactiveSessions(
     `SELECT id, updated_at, metadata
      FROM sessions
      WHERE status = 'active'
-     AND updated_at < NOW() - make_interval(mins => $1::int)
-     ORDER BY updated_at ASC
+     AND COALESCE(
+       (metadata->>'lastHeartbeat')::timestamptz,
+       updated_at
+     ) < NOW() - make_interval(mins => $1::int)
+     ORDER BY COALESCE(
+       (metadata->>'lastHeartbeat')::timestamptz,
+       updated_at
+     ) ASC
      LIMIT $2`,
     [olderThanMinutes, limit]
   );
@@ -701,7 +710,9 @@ export async function batchUpdateSessionStatus(
 
 /**
  * Update session heartbeat timestamp
- * Stores lastHeartbeat in metadata and updates updated_at
+ * Stores lastHeartbeat in metadata and explicitly updates updated_at
+ * Note: We explicitly set updated_at rather than relying on database triggers
+ * to ensure the function works regardless of trigger configuration
  */
 export async function updateSessionHeartbeat(
   db: Pool,
@@ -709,7 +720,8 @@ export async function updateSessionHeartbeat(
 ): Promise<boolean> {
   const result = await db.query(
     `UPDATE sessions
-     SET metadata = metadata || jsonb_build_object('lastHeartbeat', to_jsonb(NOW()::text))
+     SET metadata = metadata || jsonb_build_object('lastHeartbeat', to_jsonb(NOW()::text)),
+         updated_at = NOW()
      WHERE id = $1
      RETURNING id`,
     [sessionId]

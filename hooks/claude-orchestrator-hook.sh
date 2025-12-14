@@ -159,13 +159,20 @@ start_heartbeat() {
     fi
 
     # Start heartbeat loop in background
+    # Note: The PID file is written by the background process immediately to avoid race conditions
     (
+        # Write PID file first thing before any checks that might exit
+        echo "$$" > "$pid_file" 2>/dev/null
+
         trap 'rm -f "$pid_file"; exit 0' TERM INT
+
+        # Send immediate heartbeat to avoid being marked stale before first ping
+        send_heartbeat "$session_id" || true
 
         while true; do
             sleep "$HEARTBEAT_INTERVAL"
 
-            # Check if we should continue (PID file still exists and matches our PID)
+            # Check if we should continue (PID file still exists)
             if [ ! -f "$pid_file" ]; then
                 exit 0
             fi
@@ -176,7 +183,9 @@ start_heartbeat() {
     ) &
 
     local heartbeat_pid=$!
-    echo "$heartbeat_pid" > "$pid_file" 2>/dev/null
+
+    # Wait briefly to ensure the background process has written its PID file
+    sleep 0.1 2>/dev/null || true
 
     # Disown the background process so it survives script exit
     disown "$heartbeat_pid" 2>/dev/null || true
