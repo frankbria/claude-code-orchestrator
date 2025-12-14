@@ -219,7 +219,28 @@ export function createRouter(db: Pool) {
             expectedVersion
           );
 
-          // Fetch updated session for cleanup check
+          // Best-effort metadata merge in optimistic-locking path
+          // Note: mergeSessionMetadata may increment version via triggers,
+          // so we refetch to get the actual current version
+          if (metadata !== null && typeof metadata === 'object' && !Array.isArray(metadata)) {
+            try {
+              await mergeSessionMetadata(db, req.params.id, metadata);
+              apiLogger.info('Session metadata merged (versioned path)', {
+                requestId,
+                sessionId: req.params.id,
+                metadataKeys: Object.keys(metadata),
+              });
+            } catch (error) {
+              apiLogger.error('Failed to merge session metadata', {
+                requestId,
+                sessionId: req.params.id,
+                error: (error as Error).message,
+              });
+              // Don't fail the request - metadata merge is best-effort
+            }
+          }
+
+          // Fetch updated session for cleanup check and to get actual version
           const session = await getSessionById(db, req.params.id);
 
           // Trigger cleanup if applicable
@@ -229,7 +250,7 @@ export function createRouter(db: Pool) {
 
           res.json({
             status: 'updated',
-            version: newVersion
+            version: session?.version ?? newVersion
           });
           return;
         } catch (error) {

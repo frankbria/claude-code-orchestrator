@@ -135,6 +135,32 @@ send_heartbeat() {
     return $?
 }
 
+# Validate session ID format (UUID or safe filename characters)
+# Returns 0 if valid, 1 if invalid
+is_valid_session_id() {
+    local session_id="$1"
+
+    if [ -z "$session_id" ]; then
+        return 1
+    fi
+
+    # Allow UUIDs or safe filename characters only (alphanumeric, dash, underscore, dot)
+    # This prevents path traversal and special character attacks
+    if [[ "$session_id" =~ ^[A-Za-z0-9._-]+$ ]]; then
+        return 0
+    fi
+
+    return 1
+}
+
+# Sanitize session ID for use in file paths
+# Replaces any unsafe characters with underscores (defensive, after validation)
+sanitize_session_id() {
+    local session_id="$1"
+    # Replace anything that's not alphanumeric, dash, underscore, or dot with underscore
+    echo "$session_id" | tr -c 'A-Za-z0-9._-' '_'
+}
+
 # Start the heartbeat background process if not already running
 # The heartbeat process sends periodic pings to the orchestrator to indicate liveness
 start_heartbeat() {
@@ -144,7 +170,17 @@ start_heartbeat() {
         return 0  # No session ID, skip heartbeat
     fi
 
-    local pid_file="/tmp/claude-heartbeat-${session_id}.pid"
+    # Validate session ID to prevent path traversal attacks
+    if ! is_valid_session_id "$session_id"; then
+        # Invalid session ID format - skip heartbeat silently to not block Claude Code
+        return 0
+    fi
+
+    # Sanitize for extra safety (defensive programming)
+    local safe_session_id
+    safe_session_id=$(sanitize_session_id "$session_id")
+
+    local pid_file="/tmp/claude-heartbeat-${safe_session_id}.pid"
 
     # Check if heartbeat is already running
     if [ -f "$pid_file" ]; then
@@ -162,7 +198,8 @@ start_heartbeat() {
     # Note: The PID file is written by the background process immediately to avoid race conditions
     (
         # Write PID file first thing before any checks that might exit
-        echo "$$" > "$pid_file" 2>/dev/null
+        # Use BASHPID to get the actual subshell PID, not the parent's $$
+        echo "$BASHPID" > "$pid_file" 2>/dev/null
 
         trap 'rm -f "$pid_file"; exit 0' TERM INT
 
@@ -201,7 +238,16 @@ stop_heartbeat() {
         return 0
     fi
 
-    local pid_file="/tmp/claude-heartbeat-${session_id}.pid"
+    # Validate session ID to prevent path traversal attacks
+    if ! is_valid_session_id "$session_id"; then
+        return 0
+    fi
+
+    # Sanitize for extra safety
+    local safe_session_id
+    safe_session_id=$(sanitize_session_id "$session_id")
+
+    local pid_file="/tmp/claude-heartbeat-${safe_session_id}.pid"
 
     if [ -f "$pid_file" ]; then
         local pid

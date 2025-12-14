@@ -815,7 +815,10 @@ Claude Code provides these variables to hooks:
 The session monitor is a background service that detects stale and crashed sessions:
 
 **Stale Detection** (every minute):
-- Queries for active sessions with `updated_at` older than 2 minutes
+- Queries for active sessions where `metadata.lastHeartbeat` (parsed as timestamptz) is older than 2 minutes
+- Falls back to `updated_at` when `metadata.lastHeartbeat` is missing or unparseable
+- The heartbeat endpoint **must** set `metadata.lastHeartbeat` so the monitor uses it preferentially
+- This avoids false positives from unrelated updates that might touch `updated_at`
 - Marks sessions as 'stale' status
 - Triggers session state change metrics
 
