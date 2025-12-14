@@ -260,7 +260,7 @@ Returns detailed component status:
 Access metrics at `GET /api/metrics` (requires `CLAUDE_HOOK_SECRET` header in production):
 
 ```bash
-curl -H "X-Hook-Secret: your-secret" http://localhost:3001/api/metrics
+curl -H "x-hook-secret: $CLAUDE_HOOK_SECRET" http://localhost:3001/api/metrics
 ```
 
 **Available Metrics:**
@@ -290,10 +290,12 @@ scrape_configs:
     static_configs:
       - targets: ['localhost:3001']
     metrics_path: '/api/metrics'
-    # If using authentication:
-    # authorization:
-    #   credentials: 'your-hook-secret'
 ```
+
+> **Note:** The `/api/metrics` endpoint requires the `x-hook-secret` header when `CLAUDE_HOOK_SECRET` is configured. Since Prometheus doesn't support custom headers natively, you have several options:
+> 1. **Internal network**: Run Prometheus on the same network without `CLAUDE_HOOK_SECRET` set
+> 2. **Reverse proxy**: Use nginx/Caddy to add the `x-hook-secret` header to requests from Prometheus
+> 3. **Separate endpoint**: Expose metrics on a separate internal-only port
 
 ### Grafana Dashboard
 
