@@ -16,7 +16,8 @@
 # Environment Variables (configuration):
 #   CLAUDE_ORCHESTRATOR_API  - API endpoint (default: http://localhost:3001)
 #   CLAUDE_ORCHESTRATOR_LOGS - Log directory (default: /var/log/claude-orchestrator/events)
-#   CLAUDE_HOOK_SECRET       - Optional shared secret for authentication
+#   CLAUDE_HOOK_SECRET       - Optional shared secret for hook authentication
+#   ORCHESTRATOR_API_KEY     - Optional API key for session endpoint authentication
 #   HOOK_TIMEOUT             - HTTP timeout in seconds (default: 5)
 #   ORCHESTRATOR_SESSION_ID  - UUID of the orchestrator session (enables heartbeat)
 #   HEARTBEAT_INTERVAL       - Heartbeat interval in seconds (default: 30)
@@ -28,6 +29,7 @@ set +e
 API_URL="${CLAUDE_ORCHESTRATOR_API:-http://localhost:3001}"
 LOG_DIR="${CLAUDE_ORCHESTRATOR_LOGS:-/var/log/claude-orchestrator/events}"
 HOOK_SECRET="${CLAUDE_HOOK_SECRET:-}"
+API_KEY="${ORCHESTRATOR_API_KEY:-}"
 TIMEOUT="${HOOK_TIMEOUT:-5}"
 MAX_RESULT_SIZE=50000
 
@@ -123,6 +125,10 @@ send_heartbeat() {
 
     if [ -n "$HOOK_SECRET" ]; then
         curl_args+=(-H "x-hook-secret: $HOOK_SECRET")
+    fi
+
+    if [ -n "$API_KEY" ]; then
+        curl_args+=(-H "x-api-key: $API_KEY")
     fi
 
     curl "${curl_args[@]}" "$API_URL/api/sessions/$session_id/heartbeat" >/dev/null 2>&1
