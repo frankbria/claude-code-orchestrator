@@ -218,8 +218,97 @@ claude --print --resume <claude-session-id> -p "Now check the database queries"
 ### Health Check
 
 - `GET /health` - Health check endpoint (no authentication)
+- `GET /api/health` - Comprehensive health check with component status
+- `GET /api/metrics` - Prometheus metrics endpoint (requires authentication)
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for complete API documentation.
+
+## Monitoring
+
+The orchestrator includes built-in Prometheus metrics and health checks for production monitoring.
+
+### Health Checks
+
+**Basic Health Check** (`GET /health`):
+```bash
+curl http://localhost:3001/health
+```
+
+**Comprehensive Health Check** (`GET /api/health`):
+```bash
+curl http://localhost:3001/api/health
+```
+
+Returns detailed component status:
+```json
+{
+  "status": "healthy",
+  "timestamp": "2024-01-15T10:30:00.000Z",
+  "checks": {
+    "database": { "status": "ok", "latencyMs": 2 },
+    "diskSpace": { "status": "ok", "available": 45.2, "unit": "GB" },
+    "workspaces": { "status": "ok", "count": 12 },
+    "pool": { "total": 10, "idle": 8, "active": 2 }
+  }
+}
+```
+
+### Prometheus Metrics
+
+Access metrics at `GET /api/metrics` (requires `CLAUDE_HOOK_SECRET` header in production):
+
+```bash
+curl -H "X-Hook-Secret: your-secret" http://localhost:3001/api/metrics
+```
+
+**Available Metrics:**
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `hooks_received_total` | Counter | Total hooks received (labels: tool, status) |
+| `sessions_active` | Gauge | Current active sessions |
+| `api_request_duration_ms` | Histogram | API latency (labels: route, method, status) |
+| `disk_space_available_bytes` | Gauge | Available workspace disk space |
+| `db_connections_total` | Gauge | Total database connections |
+| `db_connections_active` | Gauge | Active database connections |
+| `db_connections_idle` | Gauge | Idle database connections |
+| `workspaces_count` | Gauge | Number of workspace directories |
+| `hook_delivery_latency_ms` | Histogram | Hook delivery latency |
+| `retry_daemon_pending` | Gauge | Pending retries in daemon |
+| `retry_daemon_dead_letter` | Gauge | Events in dead letter queue |
+
+### Prometheus Configuration
+
+Add to your `prometheus.yml`:
+
+```yaml
+scrape_configs:
+  - job_name: 'claude-orchestrator'
+    scrape_interval: 15s
+    static_configs:
+      - targets: ['localhost:3001']
+    metrics_path: '/api/metrics'
+    # If using authentication:
+    # authorization:
+    #   credentials: 'your-hook-secret'
+```
+
+### Grafana Dashboard
+
+Import the included dashboard template:
+
+1. Open Grafana
+2. Go to Dashboards > Import
+3. Upload `grafana-dashboard.json` from this repository
+4. Select your Prometheus data source
+
+The dashboard includes panels for:
+- Active sessions over time
+- Hook delivery rate by tool
+- API latency percentiles (p50, p95, p99)
+- Database connection pool status
+- Disk space monitoring
+- Error rates
 
 ## n8n Integration
 
@@ -433,7 +522,7 @@ MIT License - see [LICENSE](LICENSE) file for details.
 
 ### Phase 3: Production Readiness
 - [x] Authentication & authorization (API key authentication)
-- [ ] Prometheus metrics & monitoring
+- [x] Prometheus metrics & monitoring
 - [ ] Docker Compose deployment
 - [ ] Automated tests (unit + E2E)
 
