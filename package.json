@@ -1,8 +1,11 @@
 {
   "name": "claude-orchestrator",
   "version": "1.0.0",
-  "description": "",
+  "description": "Headless orchestration system for Claude Code",
   "main": "index.js",
+  "engines": {
+    "node": ">=18.0.0"
+  },
   "scripts": {
     "test": "jest",
     "test:security": "jest src/__tests__/security",

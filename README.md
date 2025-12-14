@@ -58,10 +58,12 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for detailed architecture documentation.
 
 ### Prerequisites
 
-- Node.js 20+
+- Node.js 18+ (18.15.0+ recommended for native disk metrics via `fs.statfs`)
 - PostgreSQL 15+
 - Claude Code CLI (`@anthropic-ai/claude-code`)
 - n8n (optional, for workflow automation)
+
+> **Note:** Node.js versions below 18.15.0 will use a `df` command fallback for disk space monitoring. This works on Linux/macOS but may have reduced accuracy. For best results, use Node.js 18.15.0 or later.
 
 ### Installation
 
