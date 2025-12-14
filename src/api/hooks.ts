@@ -3,6 +3,12 @@ import express from 'express';
 import { Pool } from 'pg';
 import { createLogger } from '../utils/logger';
 import { validate as uuidValidate } from 'uuid';
+import {
+  getSessionById,
+  touchSessionWithVersion,
+  VersionConflictError,
+} from '../db/queries';
+import { withOptimisticLockRetry, retryMetrics } from '../db/retry';
 
 const logger = createLogger('hooks');
 
@@ -77,16 +83,25 @@ async function eventExists(
 }
 
 /**
+ * Resolved session information including version for optimistic locking
+ */
+interface ResolvedSession {
+  id: string;
+  claudeSessionId: string | null;
+  version: number;
+}
+
+/**
  * Resolve a session identifier to its UUID (sessions.id).
  * The incoming session value could be either:
  * - A UUID (sessions.id) - used directly
  * - A claude_session_id string - looked up to get the UUID
- * Returns { id, claude_session_id } or null if not found.
+ * Returns { id, claudeSessionId, version } or null if not found.
  */
 async function resolveSession(
   db: Pool,
   sessionIdentifier: string | undefined
-): Promise<{ id: string; claudeSessionId: string } | null> {
+): Promise<ResolvedSession | null> {
   if (!sessionIdentifier) {
     return null;
   }
@@ -95,26 +110,28 @@ async function resolveSession(
   if (isValidUuid(sessionIdentifier)) {
     // Try to find by id first
     const byId = await db.query(
-      `SELECT id, claude_session_id FROM sessions WHERE id = $1`,
+      `SELECT id, claude_session_id, version FROM sessions WHERE id = $1`,
       [sessionIdentifier]
     );
     if (byId.rows.length > 0) {
       return {
         id: byId.rows[0].id,
-        claudeSessionId: byId.rows[0].claude_session_id
+        claudeSessionId: byId.rows[0].claude_session_id,
+        version: byId.rows[0].version
       };
     }
   }
 
   // Try to find by claude_session_id
   const byClaudeId = await db.query(
-    `SELECT id, claude_session_id FROM sessions WHERE claude_session_id = $1`,
+    `SELECT id, claude_session_id, version FROM sessions WHERE claude_session_id = $1`,
     [sessionIdentifier]
   );
   if (byClaudeId.rows.length > 0) {
     return {
       id: byClaudeId.rows[0].id,
-      claudeSessionId: byClaudeId.rows[0].claude_session_id
+      claudeSessionId: byClaudeId.rows[0].claude_session_id,
+      version: byClaudeId.rows[0].version
     };
   }
 
@@ -214,11 +231,33 @@ export function createHookRouter(db: Pool) {
         ]
       );
 
-      // Update session's last activity using resolved UUID
-      await db.query(
-        `UPDATE sessions SET updated_at = NOW() WHERE id = $1`,
-        [resolvedSession.id]
+      // Update session's last activity with optimistic locking
+      // Use retry logic to handle concurrent hook deliveries
+      const updateResult = await withOptimisticLockRetry(
+        async () => {
+          // Re-fetch session to get latest version
+          const currentSession = await getSessionById(db, resolvedSession.id);
+          if (!currentSession) {
+            throw new Error(`Session disappeared: ${resolvedSession.id}`);
+          }
+          return touchSessionWithVersion(db, resolvedSession.id, currentSession.version);
+        },
+        { maxRetries: 3, baseDelayMs: 100 }
       );
+
+      // Track retry metrics for monitoring
+      retryMetrics.record(updateResult);
+
+      if (!updateResult.success) {
+        // Log but don't fail the request - the command log was already inserted
+        logger.warn('Failed to update session timestamp after retries', {
+          eventId,
+          sessionId: resolvedSession.id,
+          attempts: updateResult.attempts,
+          retriesExhausted: updateResult.retriesExhausted,
+          error: updateResult.error?.message
+        });
+      }
 
       logger.info('Tool complete event recorded', {
         eventId,
@@ -228,7 +267,9 @@ export function createHookRouter(db: Pool) {
         tool,
         durationMs,
         timestamp: eventTimestamp,
-        clientTimestamp: !!parsedTimestamp
+        clientTimestamp: !!parsedTimestamp,
+        sessionUpdateAttempts: updateResult.attempts,
+        sessionUpdateSuccess: updateResult.success
       });
 
       res.status(200).json({
@@ -394,6 +435,30 @@ export function createHookRouter(db: Pool) {
         timestamp: new Date().toISOString()
       });
     }
+  });
+
+  // Metrics endpoint for monitoring retry behavior
+  router.get('/metrics', async (_req, res) => {
+    const metrics = retryMetrics.getMetrics();
+    res.json({
+      retryMetrics: {
+        totalAttempts: metrics.totalAttempts,
+        successfulFirstAttempts: metrics.successfulFirstAttempts,
+        successfulRetries: metrics.successfulRetries,
+        failedAfterRetries: metrics.failedAfterRetries,
+        nonRetryableErrors: metrics.nonRetryableErrors,
+        // Derived metrics
+        successRate: metrics.totalAttempts > 0
+          ? ((metrics.successfulFirstAttempts + metrics.successfulRetries) /
+             (metrics.successfulFirstAttempts + metrics.successfulRetries + metrics.failedAfterRetries + metrics.nonRetryableErrors) * 100).toFixed(2) + '%'
+          : 'N/A',
+        retryRate: metrics.totalAttempts > 0
+          ? ((metrics.successfulRetries + metrics.failedAfterRetries) /
+             (metrics.successfulFirstAttempts + metrics.successfulRetries + metrics.failedAfterRetries + metrics.nonRetryableErrors) * 100).toFixed(2) + '%'
+          : 'N/A',
+      },
+      timestamp: new Date().toISOString()
+    });
   });
 
   return router;

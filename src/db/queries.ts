@@ -14,6 +14,20 @@ export interface Session {
   metadata: Record<string, unknown>;
   created_at: Date;
   updated_at: Date;
+  version: number;
+}
+
+// Error thrown when optimistic lock version mismatch occurs
+export class VersionConflictError extends Error {
+  readonly sessionId: string;
+  readonly expectedVersion: number;
+
+  constructor(sessionId: string, expectedVersion: number) {
+    super(`Version conflict for session ${sessionId}: expected version ${expectedVersion}`);
+    this.name = 'VersionConflictError';
+    this.sessionId = sessionId;
+    this.expectedVersion = expectedVersion;
+  }
 }
 
 export interface SessionForCleanup {
@@ -374,7 +388,7 @@ export async function getSessionById(
 ): Promise<Session | null> {
   const result = await db.query(
     `SELECT id, project_path, project_type, status, claude_session_id,
-            metadata, created_at, updated_at
+            metadata, created_at, updated_at, version
      FROM sessions
      WHERE id = $1`,
     [id]
@@ -385,6 +399,140 @@ export async function getSessionById(
   }
 
   return result.rows[0];
+}
+
+/**
+ * Get a session by Claude session ID
+ */
+export async function getSessionByClaudeId(
+  db: Pool,
+  claudeSessionId: string
+): Promise<Session | null> {
+  const result = await db.query(
+    `SELECT id, project_path, project_type, status, claude_session_id,
+            metadata, created_at, updated_at, version
+     FROM sessions
+     WHERE claude_session_id = $1`,
+    [claudeSessionId]
+  );
+
+  if (result.rows.length === 0) {
+    return null;
+  }
+
+  return result.rows[0];
+}
+
+/**
+ * Session update payload for optimistic locking updates
+ */
+export interface SessionUpdatePayload {
+  status?: SessionStatus;
+  claude_session_id?: string;
+  metadata?: Record<string, unknown>;
+}
+
+/**
+ * Update a session with optimistic locking
+ *
+ * This function performs an UPDATE with a version check to prevent
+ * concurrent updates from overwriting each other. If the version
+ * doesn't match, a VersionConflictError is thrown.
+ *
+ * @param db Database pool
+ * @param id Session UUID
+ * @param updates Fields to update
+ * @param expectedVersion The version the caller expects the session to have
+ * @returns The new version number after update
+ * @throws VersionConflictError if the current version doesn't match expectedVersion
+ */
+export async function updateSessionWithVersion(
+  db: Pool,
+  id: string,
+  updates: SessionUpdatePayload,
+  expectedVersion: number
+): Promise<number> {
+  // Build dynamic SET clause based on provided fields
+  const setClauses: string[] = [];
+  const values: any[] = [];
+  let paramIndex = 1;
+
+  if (updates.status !== undefined) {
+    setClauses.push(`status = $${paramIndex++}`);
+    values.push(updates.status);
+  }
+
+  if (updates.claude_session_id !== undefined) {
+    setClauses.push(`claude_session_id = $${paramIndex++}`);
+    values.push(updates.claude_session_id);
+  }
+
+  if (updates.metadata !== undefined) {
+    setClauses.push(`metadata = $${paramIndex++}`);
+    values.push(JSON.stringify(updates.metadata));
+  }
+
+  // If no updates provided, just return the current version
+  if (setClauses.length === 0) {
+    const session = await getSessionById(db, id);
+    if (!session) {
+      throw new Error(`Session not found: ${id}`);
+    }
+    return session.version;
+  }
+
+  // Add id and expected version as parameters
+  const idParamIndex = paramIndex++;
+  const versionParamIndex = paramIndex;
+  values.push(id, expectedVersion);
+
+  const query = `
+    UPDATE sessions
+    SET ${setClauses.join(', ')}
+    WHERE id = $${idParamIndex} AND version = $${versionParamIndex}
+    RETURNING version
+  `;
+
+  const result = await db.query(query, values);
+
+  if (result.rows.length === 0) {
+    // Version mismatch - the session was updated by another process
+    throw new VersionConflictError(id, expectedVersion);
+  }
+
+  return result.rows[0].version;
+}
+
+/**
+ * Update session's updated_at timestamp with optimistic locking
+ * Used by hook handlers to mark session activity
+ *
+ * @param db Database pool
+ * @param id Session UUID
+ * @param expectedVersion The version the caller expects
+ * @returns The new version number after update
+ * @throws VersionConflictError if version mismatch
+ */
+export async function touchSessionWithVersion(
+  db: Pool,
+  id: string,
+  expectedVersion: number
+): Promise<number> {
+  // The trigger will auto-increment version and update updated_at
+  // We just need to do a minimal update that triggers it
+  const result = await db.query(
+    `UPDATE sessions
+     SET metadata = metadata
+     WHERE id = $1 AND version = $2
+     RETURNING version`,
+    [id, expectedVersion]
+  );
+
+  if (result.rows.length === 0) {
+    throw new VersionConflictError(id, expectedVersion);
+  }
+
+  return result.rows[0].version;
 }
 
 /**

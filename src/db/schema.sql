@@ -13,12 +13,31 @@ CREATE TABLE IF NOT EXISTS sessions (
     status VARCHAR(50) DEFAULT 'created',
     created_at TIMESTAMP DEFAULT NOW(),
     updated_at TIMESTAMP DEFAULT NOW(),
+    version INTEGER NOT NULL DEFAULT 1,
     metadata JSONB DEFAULT '{}'::jsonb
 );
 
 CREATE INDEX IF NOT EXISTS idx_sessions_status ON sessions (status);
 CREATE INDEX IF NOT EXISTS idx_sessions_updated_at ON sessions (updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_sessions_claude_session_id ON sessions (claude_session_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_id_version ON sessions (id, version);
+
+-- Function to auto-increment version on updates (for optimistic locking)
+CREATE OR REPLACE FUNCTION update_session_version()
+RETURNS TRIGGER AS $$
+BEGIN
+    NEW.version := OLD.version + 1;
+    NEW.updated_at := NOW();
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Trigger to automatically increment version on any update
+DROP TRIGGER IF EXISTS trigger_update_session_version ON sessions;
+CREATE TRIGGER trigger_update_session_version
+BEFORE UPDATE ON sessions
+FOR EACH ROW
+EXECUTE FUNCTION update_session_version();
 
 -- Session messages table
 CREATE TABLE IF NOT EXISTS session_messages (

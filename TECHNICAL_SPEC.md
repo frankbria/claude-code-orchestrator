@@ -506,8 +506,27 @@ CREATE TABLE sessions (
     status VARCHAR(50) DEFAULT 'active' CHECK (status IN ('active', 'paused', 'completed', 'error')),
     created_at TIMESTAMP DEFAULT NOW(),
     updated_at TIMESTAMP DEFAULT NOW(),
+    version INTEGER NOT NULL DEFAULT 1,  -- Optimistic locking version
     metadata JSONB DEFAULT '{}'
 );
+
+-- Index for optimistic locking queries
+CREATE INDEX idx_sessions_id_version ON sessions (id, version);
+
+-- Trigger to auto-increment version on updates
+CREATE OR REPLACE FUNCTION update_session_version()
+RETURNS TRIGGER AS $$
+BEGIN
+    NEW.version := OLD.version + 1;
+    NEW.updated_at := NOW();
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trigger_update_session_version
+BEFORE UPDATE ON sessions
+FOR EACH ROW
+EXECUTE FUNCTION update_session_version();
 
 -- Session messages table
 CREATE TABLE session_messages (
