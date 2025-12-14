@@ -6,6 +6,7 @@ import { validate as uuidValidate } from 'uuid';
 import {
   getSessionById,
   touchSessionWithVersion,
+  updateSessionHeartbeat,
 } from '../db/queries';
 import { withOptimisticLockRetry, retryMetrics } from '../db/retry';
 import { scrubSecrets, scrubObjectSecrets, logScrubbedSecrets, isScrubbingEnabled } from '../services/secretScrubber';
@@ -524,6 +525,53 @@ export function createHookRouter(db: Pool, options: HookRouterOptions = {}) {
       res.status(500).json({
         error: 'Internal server error',
         code: 'HOOK_PROCESSING_ERROR'
+      });
+    }
+  });
+
+  // Session heartbeat endpoint - called periodically by hook scripts to indicate liveness
+  // This endpoint is accessible via hook auth (x-hook-secret) for Claude Code hooks
+  router.post('/sessions/:id/heartbeat', async (req, res) => {
+    try {
+      const sessionId = req.params.id;
+
+      // Validate session ID format
+      if (!isValidUuid(sessionId)) {
+        logger.warn('Heartbeat received with invalid session ID format', {
+          sessionId,
+        });
+        res.status(400).json({
+          error: 'Invalid session ID format',
+          code: 'INVALID_SESSION_ID'
+        });
+        return;
+      }
+
+      // Update session heartbeat
+      const updated = await updateSessionHeartbeat(db, sessionId);
+
+      if (!updated) {
+        logger.warn('Heartbeat received for unknown session', {
+          sessionId,
+        });
+        res.status(404).json({
+          error: 'Session not found',
+          code: 'SESSION_NOT_FOUND'
+        });
+        return;
+      }
+
+      // Heartbeats are frequent - only log at debug level in production
+      // For now, we'll skip logging to reduce noise
+      res.status(200).json({ status: 'ok' });
+    } catch (error) {
+      logger.error('Heartbeat processing error', {
+        sessionId: req.params.id,
+        error: (error as Error).message,
+      });
+      res.status(500).json({
+        error: 'Internal server error',
+        code: 'HEARTBEAT_ERROR'
       });
     }
   });

@@ -131,7 +131,7 @@ send_heartbeat() {
         curl_args+=(-H "x-api-key: $API_KEY")
     fi
 
-    curl "${curl_args[@]}" "$API_URL/api/sessions/$session_id/heartbeat" >/dev/null 2>&1
+    curl "${curl_args[@]}" "$API_URL/api/hooks/sessions/$session_id/heartbeat" >/dev/null 2>&1
     return $?
 }
 
