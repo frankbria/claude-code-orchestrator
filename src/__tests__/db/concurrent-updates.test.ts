@@ -337,7 +337,7 @@ describe('updateSessionWithVersion', () => {
     expect(newVersion2).toBe(3);
   });
 
-  it('should return current version when no updates provided', async () => {
+  it('should return current version when no updates provided and version matches', async () => {
     const mockSession = createMockSession({ version: 5 });
     mockDb.addSession(mockSession);
 
@@ -349,6 +349,21 @@ describe('updateSessionWithVersion', () => {
     );
 
     expect(version).toBe(5);
+  });
+
+  it('should throw VersionConflictError when no updates provided but version mismatches', async () => {
+    const mockSession = createMockSession({ version: 5 });
+    mockDb.addSession(mockSession);
+
+    // Even with no updates, a stale version should fail
+    await expect(
+      updateSessionWithVersion(
+        mockDb as unknown as Pool,
+        mockSession.id,
+        {}, // No updates
+        3  // Stale version
+      )
+    ).rejects.toThrow(VersionConflictError);
   });
 });
 

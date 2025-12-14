@@ -472,11 +472,16 @@ export async function updateSessionWithVersion(
     values.push(JSON.stringify(updates.metadata));
   }
 
-  // If no updates provided, just return the current version
+  // If no updates provided, still validate the expected version to maintain
+  // the optimistic locking contract - stale callers should not "succeed"
   if (setClauses.length === 0) {
     const session = await getSessionById(db, id);
     if (!session) {
       throw new Error(`Session not found: ${id}`);
+    }
+    // Verify version matches even though we're not updating
+    if (session.version !== expectedVersion) {
+      throw new VersionConflictError(id, expectedVersion);
     }
     return session.version;
   }
