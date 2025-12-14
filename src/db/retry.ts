@@ -15,7 +15,7 @@ const logger = createLogger('retry');
  * Configuration options for retry behavior
  */
 export interface RetryOptions {
-  /** Maximum number of retry attempts (default: 3) */
+  /** Retries after initial attempt; total attempts = 1 + maxRetries (default: 3) */
   maxRetries?: number;
   /** Base delay in milliseconds for exponential backoff (default: 100) */
   baseDelayMs?: number;
