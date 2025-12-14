@@ -3,7 +3,14 @@ import express from 'express';
 import { Pool } from 'pg';
 import cron from 'node-cron';
 import * as fs from 'fs/promises';
+import { exec } from 'child_process';
+import { promisify } from 'util';
 import { createRouter } from './api/routes';
+
+const execAsync = promisify(exec);
+
+// Check if fs.statfs is available (Node.js >= 18.15.0)
+const hasStatfs = typeof fs.statfs === 'function';
 import { createHookRouter } from './api/hooks';
 import { createHealthRouter, countActiveSessions } from './api/health';
 import { createApiKeyAuth, createHookAuth, createStrictHookAuth, validateProductionSecrets, isProduction } from './middleware/auth';
@@ -239,9 +246,34 @@ async function updateMetrics(): Promise<void> {
     const workspaceBase = cleanupConfig.workspaceBase || '/tmp/claude-workspaces';
     try {
       await fs.mkdir(workspaceBase, { recursive: true });
-      const stats = await fs.statfs(workspaceBase);
-      const availableBytes = stats.bavail * stats.bsize;
-      diskSpaceAvailableBytes.set(availableBytes);
+
+      // Get disk space using fs.statfs or df fallback
+      let availableBytes: number | null = null;
+      if (hasStatfs) {
+        const stats = await fs.statfs(workspaceBase);
+        availableBytes = stats.bavail * stats.bsize;
+      } else {
+        // Fallback to df command for older Node.js versions
+        try {
+          const { stdout } = await execAsync(`df -k "${workspaceBase}"`);
+          const lines = stdout.trim().split('\n');
+          if (lines.length >= 2) {
+            const parts = lines[1].split(/\s+/);
+            const availableKB = parseInt(parts[3], 10);
+            if (!isNaN(availableKB)) {
+              availableBytes = availableKB * 1024; // KB to bytes
+            }
+          }
+        } catch (dfError) {
+          logger.warn('Failed to get disk space via df fallback', {
+            error: dfError instanceof Error ? dfError.message : String(dfError),
+          });
+        }
+      }
+
+      if (availableBytes !== null) {
+        diskSpaceAvailableBytes.set(availableBytes);
+      }
 
       // Count workspaces
       const entries = await fs.readdir(workspaceBase, { withFileTypes: true });

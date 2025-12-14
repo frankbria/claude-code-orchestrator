@@ -2,11 +2,21 @@
 import express, { RequestHandler } from 'express';
 import { Pool } from 'pg';
 import * as fs from 'fs/promises';
+import { exec } from 'child_process';
+import { promisify } from 'util';
 import { register } from '../metrics';
 import { createLogger } from '../utils/logger';
 import { getCleanupConfig } from '../config/cleanup';
 
+const execAsync = promisify(exec);
 const logger = createLogger('health');
+
+// Check if fs.statfs is available (Node.js >= 18.15.0)
+const hasStatfs = typeof fs.statfs === 'function';
+
+if (!hasStatfs) {
+  logger.warn('fs.statfs is not available (requires Node.js >= 18.15.0), using df fallback for disk checks');
+}
 
 interface HealthCheck {
   status: 'ok' | 'warning' | 'critical' | 'error';
@@ -53,7 +63,83 @@ async function checkDatabase(pool: Pool): Promise<HealthCheck> {
 }
 
 /**
- * Check available disk space on workspace volume
+ * Convert available GB to HealthCheck result with appropriate status
+ */
+function diskSpaceToHealthCheck(availableGB: number): HealthCheck {
+  if (availableGB < 5) {
+    return {
+      status: 'critical',
+      available: parseFloat(availableGB.toFixed(2)),
+      unit: 'GB',
+      message: 'Critically low disk space',
+    };
+  }
+
+  if (availableGB < 20) {
+    return {
+      status: 'warning',
+      available: parseFloat(availableGB.toFixed(2)),
+      unit: 'GB',
+      message: 'Low disk space',
+    };
+  }
+
+  return {
+    status: 'ok',
+    available: parseFloat(availableGB.toFixed(2)),
+    unit: 'GB',
+  };
+}
+
+/**
+ * Fallback disk space check using 'df' command for older Node.js versions.
+ * Parses output of 'df -k <path>' to get available blocks.
+ */
+async function checkDiskSpaceWithDf(path: string): Promise<HealthCheck> {
+  try {
+    // Use df -k for 1KB blocks, portable across Linux/macOS
+    const { stdout } = await execAsync(`df -k "${path}"`);
+    const lines = stdout.trim().split('\n');
+
+    if (lines.length < 2) {
+      logger.warn('Unexpected df output format', { stdout });
+      return {
+        status: 'warning',
+        message: 'Unable to parse disk space (unexpected df output)',
+      };
+    }
+
+    // Parse the second line (first line is headers)
+    // Format: Filesystem 1K-blocks Used Available Use% Mounted
+    const parts = lines[1].split(/\s+/);
+    // Available is typically the 4th column (index 3)
+    const availableKB = parseInt(parts[3], 10);
+
+    if (isNaN(availableKB)) {
+      logger.warn('Failed to parse available blocks from df output', { line: lines[1] });
+      return {
+        status: 'warning',
+        message: 'Unable to parse disk space (invalid number)',
+      };
+    }
+
+    const availableGB = availableKB / (1024 * 1024); // KB to GB
+    return diskSpaceToHealthCheck(availableGB);
+  } catch (error) {
+    logger.error('Disk space check via df failed', {
+      error: error instanceof Error ? error.message : String(error),
+      path,
+    });
+    return {
+      status: 'error',
+      message: error instanceof Error ? error.message : 'Disk space check failed (df)',
+    };
+  }
+}
+
+/**
+ * Check available disk space on workspace volume.
+ * Uses fs.statfs if available (Node.js >= 18.15.0), otherwise falls back to 'df' command.
  */
 async function checkDiskSpace(): Promise<HealthCheck> {
   const cleanupConfig = getCleanupConfig();
@@ -63,33 +149,16 @@ async function checkDiskSpace(): Promise<HealthCheck> {
     // Ensure directory exists
     await fs.mkdir(workspaceBase, { recursive: true });
 
-    const stats = await fs.statfs(workspaceBase);
-    const availableBytes = stats.bavail * stats.bsize;
-    const availableGB = availableBytes / (1024 ** 3);
-
-    if (availableGB < 5) {
-      return {
-        status: 'critical',
-        available: parseFloat(availableGB.toFixed(2)),
-        unit: 'GB',
-        message: 'Critically low disk space',
-      };
+    // Use fs.statfs if available, otherwise use df fallback
+    if (hasStatfs) {
+      const stats = await fs.statfs(workspaceBase);
+      const availableBytes = stats.bavail * stats.bsize;
+      const availableGB = availableBytes / (1024 ** 3);
+      return diskSpaceToHealthCheck(availableGB);
+    } else {
+      // Fallback to df command for older Node.js versions
+      return await checkDiskSpaceWithDf(workspaceBase);
     }
-
-    if (availableGB < 20) {
-      return {
-        status: 'warning',
-        available: parseFloat(availableGB.toFixed(2)),
-        unit: 'GB',
-        message: 'Low disk space',
-      };
-    }
-
-    return {
-      status: 'ok',
-      available: parseFloat(availableGB.toFixed(2)),
-      unit: 'GB',
-    };
   } catch (error) {
     logger.error('Disk space check failed', {
       error: error instanceof Error ? error.message : String(error),
