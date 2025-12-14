@@ -154,3 +154,58 @@ export const hookDeliveryLatency = new Histogram({
   buckets: [50, 100, 250, 500, 1000, 2500, 5000, 10000],
   registers: [register],
 });
+
+// =============================================================================
+// Session Monitor Metrics
+// =============================================================================
+
+/**
+ * Counter for sessions marked as stale
+ */
+export const sessionsMarkedStale = new Counter({
+  name: 'sessions_marked_stale_total',
+  help: 'Total number of sessions marked as stale due to heartbeat timeout',
+  registers: [register],
+});
+
+/**
+ * Counter for sessions marked as crashed
+ */
+export const sessionsMarkedCrashed = new Counter({
+  name: 'sessions_marked_crashed_total',
+  help: 'Total number of sessions marked as crashed due to PID check failure',
+  registers: [register],
+});
+
+/**
+ * Counter for session monitor runs
+ * Labels: type ('stale', 'liveness')
+ */
+export const sessionMonitorRuns = new Counter({
+  name: 'session_monitor_runs_total',
+  help: 'Total number of session monitor check runs',
+  labelNames: ['type'] as const,
+  registers: [register],
+});
+
+/**
+ * Counter for session monitor errors
+ * Labels: type ('stale', 'liveness')
+ */
+export const sessionMonitorErrors = new Counter({
+  name: 'session_monitor_errors_total',
+  help: 'Total number of errors in session monitor',
+  labelNames: ['type'] as const,
+  registers: [register],
+});
+
+/**
+ * Counter for heartbeat endpoint requests
+ * Labels: status ('success', 'not_found', 'error')
+ */
+export const heartbeatRequestsTotal = new Counter({
+  name: 'heartbeat_requests_total',
+  help: 'Total number of heartbeat requests received',
+  labelNames: ['status'] as const,
+  registers: [register],
+});

@@ -1,15 +1,17 @@
 // src/api/hooks.ts
-import express, { RequestHandler } from 'express';
+import express, { Request, Response, RequestHandler } from 'express';
 import { Pool } from 'pg';
+import rateLimit from 'express-rate-limit';
 import { createLogger } from '../utils/logger';
 import { validate as uuidValidate } from 'uuid';
 import {
   getSessionById,
   touchSessionWithVersion,
+  updateSessionHeartbeat,
 } from '../db/queries';
 import { withOptimisticLockRetry, retryMetrics } from '../db/retry';
 import { scrubSecrets, scrubObjectSecrets, logScrubbedSecrets, isScrubbingEnabled } from '../services/secretScrubber';
-import { hooksReceivedTotal, hookDeliveryLatency } from '../metrics';
+import { hooksReceivedTotal, hookDeliveryLatency, heartbeatRequestsTotal } from '../metrics';
 
 /**
  * Options for configuring the hook router
@@ -24,6 +26,34 @@ export interface HookRouterOptions {
 }
 
 const logger = createLogger('hooks');
+
+/**
+ * Rate limiter for heartbeat endpoint
+ * Heartbeats should be sent every 30 seconds, so we allow 10 per minute per session
+ * with a short window to handle burst reconnects
+ */
+const heartbeatRateLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1 minute
+  max: 10, // 10 requests per minute per session
+  keyGenerator: (req: Request) => {
+    // Use session ID as key to rate limit per session, not per IP
+    return req.params.id || req.ip || 'unknown';
+  },
+  message: { error: 'Too many heartbeat requests', code: 'RATE_LIMITED' },
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: (req: Request, res: Response) => {
+    logger.warn('Heartbeat rate limit exceeded', {
+      sessionId: req.params.id,
+      ip: req.ip,
+    });
+    heartbeatRequestsTotal.labels({ status: 'rate_limited' }).inc();
+    res.status(429).json({
+      error: 'Too many heartbeat requests',
+      code: 'RATE_LIMITED'
+    });
+  },
+});
 
 /**
  * Validate that a string is a valid UUID v4
@@ -524,6 +554,58 @@ export function createHookRouter(db: Pool, options: HookRouterOptions = {}) {
       res.status(500).json({
         error: 'Internal server error',
         code: 'HOOK_PROCESSING_ERROR'
+      });
+    }
+  });
+
+  // Session heartbeat endpoint - called periodically by hook scripts to indicate liveness
+  // This endpoint is accessible via hook auth (x-hook-secret) for Claude Code hooks
+  // Rate limited to prevent abuse (10 requests per minute per session)
+  router.post('/sessions/:id/heartbeat', heartbeatRateLimiter, async (req, res) => {
+    try {
+      const sessionId = req.params.id;
+
+      // Validate session ID format
+      if (!isValidUuid(sessionId)) {
+        logger.warn('Heartbeat received with invalid session ID format', {
+          sessionId,
+        });
+        heartbeatRequestsTotal.labels({ status: 'invalid_id' }).inc();
+        res.status(400).json({
+          error: 'Invalid session ID format',
+          code: 'INVALID_SESSION_ID'
+        });
+        return;
+      }
+
+      // Update session heartbeat
+      const updated = await updateSessionHeartbeat(db, sessionId);
+
+      if (!updated) {
+        logger.warn('Heartbeat received for unknown session', {
+          sessionId,
+        });
+        heartbeatRequestsTotal.labels({ status: 'not_found' }).inc();
+        res.status(404).json({
+          error: 'Session not found',
+          code: 'SESSION_NOT_FOUND'
+        });
+        return;
+      }
+
+      // Heartbeats are frequent - only log at debug level in production
+      // For now, we'll skip logging to reduce noise
+      heartbeatRequestsTotal.labels({ status: 'success' }).inc();
+      res.status(200).json({ status: 'ok' });
+    } catch (error) {
+      logger.error('Heartbeat processing error', {
+        sessionId: req.params.id,
+        error: (error as Error).message,
+      });
+      heartbeatRequestsTotal.labels({ status: 'error' }).inc();
+      res.status(500).json({
+        error: 'Internal server error',
+        code: 'HEARTBEAT_ERROR'
       });
     }
   });

@@ -16,8 +16,11 @@
 # Environment Variables (configuration):
 #   CLAUDE_ORCHESTRATOR_API  - API endpoint (default: http://localhost:3001)
 #   CLAUDE_ORCHESTRATOR_LOGS - Log directory (default: /var/log/claude-orchestrator/events)
-#   CLAUDE_HOOK_SECRET       - Optional shared secret for authentication
+#   CLAUDE_HOOK_SECRET       - Optional shared secret for hook authentication
+#   ORCHESTRATOR_API_KEY     - Optional API key for session endpoint authentication
 #   HOOK_TIMEOUT             - HTTP timeout in seconds (default: 5)
+#   ORCHESTRATOR_SESSION_ID  - UUID of the orchestrator session (enables heartbeat)
+#   HEARTBEAT_INTERVAL       - Heartbeat interval in seconds (default: 30)
 
 # Disable strict error mode - we handle errors gracefully to never block Claude Code
 set +e
@@ -26,8 +29,13 @@ set +e
 API_URL="${CLAUDE_ORCHESTRATOR_API:-http://localhost:3001}"
 LOG_DIR="${CLAUDE_ORCHESTRATOR_LOGS:-/var/log/claude-orchestrator/events}"
 HOOK_SECRET="${CLAUDE_HOOK_SECRET:-}"
+API_KEY="${ORCHESTRATOR_API_KEY:-}"
 TIMEOUT="${HOOK_TIMEOUT:-5}"
 MAX_RESULT_SIZE=50000
+
+# Heartbeat configuration
+HEARTBEAT_INTERVAL="${HEARTBEAT_INTERVAL:-30}"  # seconds
+ORCHESTRATOR_SESSION_ID="${ORCHESTRATOR_SESSION_ID:-}"  # UUID from orchestrator
 
 # Generate unique event ID using uuidgen or fallback
 generate_uuid() {
@@ -103,8 +111,164 @@ json_escape() {
         -e 's/\n/\\n/g'
 }
 
+# Send a single heartbeat to the orchestrator API
+send_heartbeat() {
+    local session_id="$1"
+
+    if [ -z "$session_id" ]; then
+        return 1
+    fi
+
+    local curl_args=(-sS -X POST)
+    curl_args+=(--connect-timeout 5)
+    curl_args+=(--max-time 10)
+
+    if [ -n "$HOOK_SECRET" ]; then
+        curl_args+=(-H "x-hook-secret: $HOOK_SECRET")
+    fi
+
+    if [ -n "$API_KEY" ]; then
+        curl_args+=(-H "x-api-key: $API_KEY")
+    fi
+
+    curl "${curl_args[@]}" "$API_URL/api/hooks/sessions/$session_id/heartbeat" >/dev/null 2>&1
+    return $?
+}
+
+# Validate session ID format (UUID or safe filename characters)
+# Returns 0 if valid, 1 if invalid
+is_valid_session_id() {
+    local session_id="$1"
+
+    if [ -z "$session_id" ]; then
+        return 1
+    fi
+
+    # Allow UUIDs or safe filename characters only (alphanumeric, dash, underscore, dot)
+    # This prevents path traversal and special character attacks
+    if [[ "$session_id" =~ ^[A-Za-z0-9._-]+$ ]]; then
+        return 0
+    fi
+
+    return 1
+}
+
+# Sanitize session ID for use in file paths
+# Replaces any unsafe characters with underscores (defensive, after validation)
+sanitize_session_id() {
+    local session_id="$1"
+    # Replace anything that's not alphanumeric, dash, underscore, or dot with underscore
+    echo "$session_id" | tr -c 'A-Za-z0-9._-' '_'
+}
+
+# Start the heartbeat background process if not already running
+# The heartbeat process sends periodic pings to the orchestrator to indicate liveness
+start_heartbeat() {
+    local session_id="$1"
+
+    if [ -z "$session_id" ]; then
+        return 0  # No session ID, skip heartbeat
+    fi
+
+    # Validate session ID to prevent path traversal attacks
+    if ! is_valid_session_id "$session_id"; then
+        # Invalid session ID format - skip heartbeat silently to not block Claude Code
+        return 0
+    fi
+
+    # Sanitize for extra safety (defensive programming)
+    local safe_session_id
+    safe_session_id=$(sanitize_session_id "$session_id")
+
+    local pid_file="/tmp/claude-heartbeat-${safe_session_id}.pid"
+
+    # Check if heartbeat is already running
+    if [ -f "$pid_file" ]; then
+        local existing_pid
+        existing_pid=$(cat "$pid_file" 2>/dev/null)
+        if [ -n "$existing_pid" ] && kill -0 "$existing_pid" 2>/dev/null; then
+            # Heartbeat already running
+            return 0
+        fi
+        # Stale PID file, remove it
+        rm -f "$pid_file" 2>/dev/null
+    fi
+
+    # Start heartbeat loop in background
+    # Note: The PID file is written by the background process immediately to avoid race conditions
+    (
+        # Write PID file first thing before any checks that might exit
+        # Use BASHPID to get the actual subshell PID, not the parent's $$
+        echo "$BASHPID" > "$pid_file" 2>/dev/null
+
+        trap 'rm -f "$pid_file"; exit 0' TERM INT
+
+        # Send immediate heartbeat to avoid being marked stale before first ping
+        send_heartbeat "$session_id" || true
+
+        while true; do
+            sleep "$HEARTBEAT_INTERVAL"
+
+            # Check if we should continue (PID file still exists)
+            if [ ! -f "$pid_file" ]; then
+                exit 0
+            fi
+
+            # Send heartbeat
+            send_heartbeat "$session_id" || true
+        done
+    ) &
+
+    local heartbeat_pid=$!
+
+    # Wait briefly to ensure the background process has written its PID file
+    sleep 0.1 2>/dev/null || true
+
+    # Disown the background process so it survives script exit
+    disown "$heartbeat_pid" 2>/dev/null || true
+
+    return 0
+}
+
+# Stop the heartbeat background process
+stop_heartbeat() {
+    local session_id="$1"
+
+    if [ -z "$session_id" ]; then
+        return 0
+    fi
+
+    # Validate session ID to prevent path traversal attacks
+    if ! is_valid_session_id "$session_id"; then
+        return 0
+    fi
+
+    # Sanitize for extra safety
+    local safe_session_id
+    safe_session_id=$(sanitize_session_id "$session_id")
+
+    local pid_file="/tmp/claude-heartbeat-${safe_session_id}.pid"
+
+    if [ -f "$pid_file" ]; then
+        local pid
+        pid=$(cat "$pid_file" 2>/dev/null)
+        if [ -n "$pid" ]; then
+            kill "$pid" 2>/dev/null || true
+        fi
+        rm -f "$pid_file" 2>/dev/null
+    fi
+
+    return 0
+}
+
 # Main execution
 main() {
+    # Start heartbeat if ORCHESTRATOR_SESSION_ID is set
+    # This keeps the session alive in the orchestrator database
+    if [ -n "$ORCHESTRATOR_SESSION_ID" ]; then
+        start_heartbeat "$ORCHESTRATOR_SESSION_ID"
+    fi
+
     # Generate unique event ID
     local event_id
     event_id=$(generate_uuid)

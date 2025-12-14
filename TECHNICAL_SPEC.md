@@ -487,6 +487,40 @@ HTTP/1.1 200 OK
 Content-Length: 0
 ```
 
+#### 10. Session Heartbeat
+
+**Purpose**: Indicate session liveness. Called periodically by hook scripts to prevent session from being marked as stale.
+
+**Request**:
+```http
+POST /api/sessions/:id/heartbeat
+```
+
+**Response** (200 OK):
+```json
+{
+  "status": "ok"
+}
+```
+
+**Error Response** (404 Not Found):
+```json
+{
+  "error": "Session not found",
+  "code": "SESSION_NOT_FOUND"
+}
+```
+
+**Implementation Notes**:
+- Updates both `updated_at` and stores `lastHeartbeat` timestamp in session metadata
+- The heartbeat endpoint **must** set `metadata.lastHeartbeat` to the current timestamp
+- Should be called every 30 seconds by hook scripts
+- **Staleness Detection**: Sessions are marked 'stale' by the session monitor when
+  `metadata.lastHeartbeat` (parsed as timestamptz) is older than 2 minutes. If
+  `lastHeartbeat` is missing or invalid, `updated_at` is used as a fallback.
+- Note: The session monitor checks `metadata.lastHeartbeat` specifically to avoid
+  false positives from unrelated updates that might touch `updated_at`
+
 ---
 
 ## Database Design
@@ -503,7 +537,7 @@ CREATE TABLE sessions (
     claude_session_id VARCHAR(255),
     project_path VARCHAR(500) NOT NULL,
     project_type VARCHAR(50) NOT NULL CHECK (project_type IN ('local', 'github', 'e2b', 'worktree')),
-    status VARCHAR(50) DEFAULT 'active' CHECK (status IN ('active', 'paused', 'completed', 'error')),
+    status VARCHAR(50) DEFAULT 'active' CHECK (status IN ('active', 'paused', 'completed', 'error', 'stale', 'crashed')),
     created_at TIMESTAMP DEFAULT NOW(),
     updated_at TIMESTAMP DEFAULT NOW(),
     version INTEGER NOT NULL DEFAULT 1,  -- Optimistic locking version
@@ -766,6 +800,43 @@ Claude Code provides these variables to hooks:
 | `TOOL_INPUT` | JSON | `{"command":"ls"}` | Tool input parameters |
 | `TOOL_RESULT` | string | `"file1.txt\nfile2.txt"` | Tool output (may be very large) |
 | `MESSAGE` | string | `"Task completed"` | Notification message |
+
+**Additional orchestrator environment variables**:
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `ORCHESTRATOR_SESSION_ID` | UUID | - | Orchestrator session UUID (enables heartbeat) |
+| `HEARTBEAT_INTERVAL` | integer | 30 | Heartbeat interval in seconds |
+| `CLAUDE_ORCHESTRATOR_API` | URL | `http://localhost:3001` | Orchestrator API endpoint |
+| `CLAUDE_HOOK_SECRET` | string | - | Optional shared secret for authentication |
+
+### Session Monitor
+
+The session monitor is a background service that detects stale and crashed sessions:
+
+**Stale Detection** (every minute):
+- Queries for active sessions where `metadata.lastHeartbeat` (parsed as timestamptz) is older than 2 minutes
+- Falls back to `updated_at` when `metadata.lastHeartbeat` is missing or unparseable
+- The heartbeat endpoint **must** set `metadata.lastHeartbeat` so the monitor uses it preferentially
+- This avoids false positives from unrelated updates that might touch `updated_at`
+- Marks sessions as 'stale' status
+- Triggers session state change metrics
+
+**Process Liveness Check** (every 5 minutes):
+- Queries sessions with `claudePid` in metadata
+- Checks if the PID is still alive using signal 0
+- Marks sessions with dead processes as 'crashed' status
+
+**Configuration Environment Variables**:
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `ENABLE_SESSION_MONITOR` | boolean | true | Enable/disable session monitor |
+| `SESSION_STALE_TIMEOUT_MINUTES` | integer | 2 | Minutes before marking session stale |
+| `SESSION_STALE_CRON` | cron | `* * * * *` | Cron expression for stale detection |
+| `SESSION_LIVENESS_CRON` | cron | `*/5 * * * *` | Cron expression for liveness checks |
+| `ENABLE_STALE_DETECTION` | boolean | true | Enable stale session detection |
+| `ENABLE_LIVENESS_CHECK` | boolean | true | Enable PID liveness checking |
 
 ---
 

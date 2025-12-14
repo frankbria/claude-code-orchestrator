@@ -12,6 +12,7 @@ import {
   VersionConflictError,
   SessionStatus,
   SessionUpdatePayload,
+  mergeSessionMetadata,
 } from '../db/queries';
 import { updateSessionWithRetry } from '../db/retry';
 import { WorkspaceManager } from '../services/workspace';
@@ -182,10 +183,11 @@ export function createRouter(db: Pool) {
     res.json(session);
   });
 
-  // Update session status
+  // Update session status and/or metadata
   // Supports optimistic locking via optional 'version' parameter
+  // Metadata merging: provided metadata is merged into existing metadata (not replaced)
   router.patch('/sessions/:id', async (req, res) => {
-    const { status, claudeSessionId, version } = req.body;
+    const { status, claudeSessionId, version, metadata } = req.body;
     const requestId = (req as any).id;
     const cleanupConfig = getCleanupConfig();
 
@@ -217,7 +219,28 @@ export function createRouter(db: Pool) {
             expectedVersion
           );
 
-          // Fetch updated session for cleanup check
+          // Best-effort metadata merge in optimistic-locking path
+          // Note: mergeSessionMetadata may increment version via triggers,
+          // so we refetch to get the actual current version
+          if (metadata !== null && typeof metadata === 'object' && !Array.isArray(metadata)) {
+            try {
+              await mergeSessionMetadata(db, req.params.id, metadata);
+              apiLogger.info('Session metadata merged (versioned path)', {
+                requestId,
+                sessionId: req.params.id,
+                metadataKeys: Object.keys(metadata),
+              });
+            } catch (error) {
+              apiLogger.error('Failed to merge session metadata', {
+                requestId,
+                sessionId: req.params.id,
+                error: (error as Error).message,
+              });
+              // Don't fail the request - metadata merge is best-effort
+            }
+          }
+
+          // Fetch updated session for cleanup check and to get actual version
           const session = await getSessionById(db, req.params.id);
 
           // Trigger cleanup if applicable
@@ -227,7 +250,7 @@ export function createRouter(db: Pool) {
 
           res.json({
             status: 'updated',
-            version: newVersion
+            version: session?.version ?? newVersion
           });
           return;
         } catch (error) {
@@ -275,6 +298,26 @@ export function createRouter(db: Pool) {
               error: (error as Error).message,
             });
           }
+        }
+      }
+
+      // Merge metadata if provided (does not overwrite existing keys unless explicitly set)
+      // Strict validation: must be a plain object (not null, not array)
+      if (metadata !== null && typeof metadata === 'object' && !Array.isArray(metadata)) {
+        try {
+          await mergeSessionMetadata(db, req.params.id, metadata);
+          apiLogger.info('Session metadata merged', {
+            requestId,
+            sessionId: req.params.id,
+            metadataKeys: Object.keys(metadata),
+          });
+        } catch (error) {
+          apiLogger.error('Failed to merge session metadata', {
+            requestId,
+            sessionId: req.params.id,
+            error: (error as Error).message,
+          });
+          // Don't fail the request - metadata merge is best-effort
         }
       }
 
@@ -335,15 +378,19 @@ export function createRouter(db: Pool) {
   // Log a message (from Slack/n8n continuation)
   router.post('/sessions/:id/messages', async (req, res) => {
     const { direction, content, source } = req.body;
-    
+
     await db.query(
       `INSERT INTO session_messages (session_id, direction, content, source)
        VALUES ($1, $2, $3, $4)`,
       [req.params.id, direction, content, source]
     );
-    
+
     res.json({ status: 'logged' });
   });
+
+  // NOTE: Heartbeat endpoint moved to hooks.ts (POST /api/hooks/sessions/:id/heartbeat)
+  // This allows Claude Code hooks to authenticate via x-hook-secret header
+  // rather than requiring API key authentication
 
   // ============================================
   // Admin API Key Management Endpoints

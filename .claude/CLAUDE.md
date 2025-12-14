@@ -75,6 +75,10 @@ For the monitoring dashboard, REST polling is sufficient because:
   - `POST /api/hooks/notification`: Fires on Claude Code status messages
 - **`src/services/workspace.ts`**: Workspace management
   - GitHub cloning, local folders, git worktrees, E2B sandboxes
+- **`src/services/sessionMonitor.ts`**: Session health monitoring
+  - Stale session detection (no heartbeat for 2+ minutes)
+  - Process liveness checks via PID tracking
+  - Automatic status transitions to 'stale' or 'crashed'
 - **`src/db/`**: Database schema and query helpers
 
 ### Dashboard (`/dashboard`)
@@ -144,6 +148,12 @@ N8N_WEBHOOK_BASE=http://localhost:5678
 # Optional: Slack integration
 SLACK_BOT_TOKEN=xoxb-your-token
 SLACK_SIGNING_SECRET=your-secret
+
+# Session Monitor Configuration
+ENABLE_SESSION_MONITOR=true
+SESSION_STALE_TIMEOUT_MINUTES=2
+SESSION_STALE_CRON=* * * * *
+SESSION_LIVENESS_CRON=*/5 * * * *
 ```
 
 ## Claude Code Hook Configuration
@@ -189,22 +199,40 @@ This allows different projects to POST to different orchestrator instances.
 
 ## API Endpoints
 
-### Sessions
+### Sessions (API Key Authentication Required)
+All session endpoints require API key authentication via the `x-api-key` header:
 - `POST /api/sessions` - Create new session
 - `GET /api/sessions` - List all sessions
 - `GET /api/sessions/:id` - Get session details
-- `PATCH /api/sessions/:id` - Update session (status, claude_session_id)
+- `PATCH /api/sessions/:id` - Update session (status, claude_session_id, metadata)
+- `POST /api/sessions/:id/heartbeat` - Signal session liveness (API key auth)
 
-### Messages
+### Messages (API Key Authentication Required)
 - `GET /api/sessions/:id/messages` - Get conversation history
 - `POST /api/sessions/:id/messages` - Add message (for dashboard intervention)
 
-### Command Logs
+### Command Logs (API Key Authentication Required)
 - `GET /api/sessions/:id/logs?limit=50` - Get tool execution history
 
-### Hooks (Called by Claude Code)
+### Hooks (Hook Secret Authentication)
+Hook endpoints use a separate authentication mechanism via the `x-hook-secret` header.
+These are called by Claude Code hook scripts:
 - `POST /api/hooks/tool-complete` - Log tool execution
 - `POST /api/hooks/notification` - Log Claude Code notification
+- `POST /api/hooks/sessions/:id/heartbeat` - Signal session liveness (hook auth)
+
+**Authentication Configuration:**
+- API key: Set `ORCHESTRATOR_API_KEY` environment variable in hook scripts
+- Hook secret: Set `HOOK_SECRET` environment variable (must match server's `HOOK_SECRET`)
+- Hook scripts should include error handling for 401/403 responses to surface auth failures
+
+### Session Status Values
+- `active` - Session is running and receiving heartbeats
+- `paused` - Session is paused
+- `completed` - Session finished successfully
+- `error` - Session encountered an error
+- `stale` - Session stopped sending heartbeats (detected by session monitor)
+- `crashed` - Claude Code process died (detected by PID liveness check)
 
 ## Development Workflow
 
