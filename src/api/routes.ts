@@ -12,6 +12,8 @@ import {
   VersionConflictError,
   SessionStatus,
   SessionUpdatePayload,
+  updateSessionHeartbeat,
+  mergeSessionMetadata,
 } from '../db/queries';
 import { updateSessionWithRetry } from '../db/retry';
 import { WorkspaceManager } from '../services/workspace';
@@ -182,10 +184,11 @@ export function createRouter(db: Pool) {
     res.json(session);
   });
 
-  // Update session status
+  // Update session status and/or metadata
   // Supports optimistic locking via optional 'version' parameter
+  // Metadata merging: provided metadata is merged into existing metadata (not replaced)
   router.patch('/sessions/:id', async (req, res) => {
-    const { status, claudeSessionId, version } = req.body;
+    const { status, claudeSessionId, version, metadata } = req.body;
     const requestId = (req as any).id;
     const cleanupConfig = getCleanupConfig();
 
@@ -278,6 +281,25 @@ export function createRouter(db: Pool) {
         }
       }
 
+      // Merge metadata if provided (does not overwrite existing keys unless explicitly set)
+      if (metadata && typeof metadata === 'object') {
+        try {
+          await mergeSessionMetadata(db, req.params.id, metadata);
+          apiLogger.info('Session metadata merged', {
+            requestId,
+            sessionId: req.params.id,
+            metadataKeys: Object.keys(metadata),
+          });
+        } catch (error) {
+          apiLogger.error('Failed to merge session metadata', {
+            requestId,
+            sessionId: req.params.id,
+            error: (error as Error).message,
+          });
+          // Don't fail the request - metadata merge is best-effort
+        }
+      }
+
       // Get updated session to return version
       const updatedSession = await getSessionById(db, req.params.id);
       res.json({
@@ -335,14 +357,55 @@ export function createRouter(db: Pool) {
   // Log a message (from Slack/n8n continuation)
   router.post('/sessions/:id/messages', async (req, res) => {
     const { direction, content, source } = req.body;
-    
+
     await db.query(
       `INSERT INTO session_messages (session_id, direction, content, source)
        VALUES ($1, $2, $3, $4)`,
       [req.params.id, direction, content, source]
     );
-    
+
     res.json({ status: 'logged' });
+  });
+
+  // Heartbeat endpoint - updates session timestamp to signal liveness
+  // Called periodically by Claude Code hook scripts to indicate the session is alive
+  router.post('/sessions/:id/heartbeat', async (req, res) => {
+    const requestId = (req as any).id;
+
+    try {
+      const updated = await updateSessionHeartbeat(db, req.params.id);
+
+      if (!updated) {
+        apiLogger.warn('Heartbeat received for unknown session', {
+          requestId,
+          sessionId: req.params.id,
+        });
+        res.status(404).json({
+          error: 'Session not found',
+          code: 'SESSION_NOT_FOUND'
+        });
+        return;
+      }
+
+      // Only log at info level for active debugging - normally heartbeats are silent
+      // apiLogger.info('Session heartbeat received', {
+      //   requestId,
+      //   sessionId: req.params.id,
+      //   timestamp: new Date().toISOString(),
+      // });
+
+      res.status(200).json({ status: 'ok' });
+    } catch (error) {
+      apiLogger.error('Heartbeat processing error', {
+        requestId,
+        sessionId: req.params.id,
+        error: (error as Error).message,
+      });
+      res.status(500).json({
+        error: 'Internal server error',
+        code: 'HEARTBEAT_ERROR'
+      });
+    }
   });
 
   // ============================================

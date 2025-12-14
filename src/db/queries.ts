@@ -3,7 +3,7 @@ import { Pool } from 'pg';
 import crypto from 'crypto';
 
 // Session types for cleanup operations
-export type SessionStatus = 'active' | 'completed' | 'error' | 'stale';
+export type SessionStatus = 'active' | 'completed' | 'error' | 'stale' | 'crashed';
 
 export interface Session {
   id: string;
@@ -637,6 +637,108 @@ export async function updateSessionStatus(
 }
 
 /**
+ * Get active sessions that haven't been updated within the specified interval
+ * Used by the session monitor to detect stale sessions
+ */
+export async function getInactiveSessions(
+  db: Pool,
+  olderThanMinutes: number,
+  limit: number = 100
+): Promise<{ id: string; updated_at: Date; metadata: Record<string, unknown> }[]> {
+  const result = await db.query(
+    `SELECT id, updated_at, metadata
+     FROM sessions
+     WHERE status = 'active'
+     AND updated_at < NOW() - make_interval(mins => $1::int)
+     ORDER BY updated_at ASC
+     LIMIT $2`,
+    [olderThanMinutes, limit]
+  );
+
+  return result.rows;
+}
+
+/**
+ * Get active sessions that have a claudePid in metadata
+ * Used for process liveness checks
+ */
+export async function getSessionsWithPid(
+  db: Pool
+): Promise<{ id: string; metadata: Record<string, unknown> }[]> {
+  const result = await db.query(
+    `SELECT id, metadata
+     FROM sessions
+     WHERE status = 'active'
+     AND metadata ? 'claudePid'`
+  );
+
+  return result.rows;
+}
+
+/**
+ * Batch update sessions to a new status
+ * Used by session monitor to mark multiple sessions as stale/crashed
+ */
+export async function batchUpdateSessionStatus(
+  db: Pool,
+  sessionIds: string[],
+  status: SessionStatus
+): Promise<number> {
+  if (sessionIds.length === 0) {
+    return 0;
+  }
+
+  const result = await db.query(
+    `UPDATE sessions
+     SET status = $1
+     WHERE id = ANY($2::uuid[])
+     RETURNING id`,
+    [status, sessionIds]
+  );
+
+  return result.rows.length;
+}
+
+/**
+ * Update session heartbeat timestamp
+ * Stores lastHeartbeat in metadata and updates updated_at
+ */
+export async function updateSessionHeartbeat(
+  db: Pool,
+  sessionId: string
+): Promise<boolean> {
+  const result = await db.query(
+    `UPDATE sessions
+     SET metadata = metadata || jsonb_build_object('lastHeartbeat', to_jsonb(NOW()::text))
+     WHERE id = $1
+     RETURNING id`,
+    [sessionId]
+  );
+
+  return result.rows.length > 0;
+}
+
+/**
+ * Merge metadata into an existing session's metadata field
+ * Used by PATCH endpoint to support partial metadata updates
+ */
+export async function mergeSessionMetadata(
+  db: Pool,
+  sessionId: string,
+  metadata: Record<string, unknown>
+): Promise<boolean> {
+  const result = await db.query(
+    `UPDATE sessions
+     SET metadata = metadata || $1::jsonb
+     WHERE id = $2
+     RETURNING id`,
+    [JSON.stringify(metadata), sessionId]
+  );
+
+  return result.rows.length > 0;
+}
+
+/**
  * Get count of sessions by status
  */
 export async function getSessionStatusCounts(
@@ -653,6 +755,7 @@ export async function getSessionStatusCounts(
     completed: 0,
     error: 0,
     stale: 0,
+    crashed: 0,
   };
 
   for (const row of result.rows) {

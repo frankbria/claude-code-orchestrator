@@ -17,6 +17,7 @@ import { createApiKeyAuth, createHookAuth, createStrictHookAuth, validateProduct
 import { metricsMiddleware } from './middleware/metrics';
 import { startRetryDaemon, stopRetryDaemon, getRetryDaemon } from './services/retryDaemon';
 import { startCleanupJob, stopCleanupJob, getCleanupJob } from './services/cleanup-job';
+import { startSessionMonitor, stopSessionMonitor, getSessionMonitor } from './services/sessionMonitor';
 import { WorkspaceManager } from './services/workspace';
 import { getCleanupConfig, validateCleanupConfig, isTarAvailable } from './config/cleanup';
 import { createLogger } from './utils/logger';
@@ -94,6 +95,10 @@ app.get('/health', async (req, res) => {
     const cleanupStats = cleanupJob ? cleanupJob.getStats() : null;
     const cleanupConfig = getCleanupConfig();
 
+    // Get session monitor status
+    const sessionMonitor = getSessionMonitor();
+    const sessionMonitorStats = sessionMonitor ? sessionMonitor.getStats() : null;
+
     // Get disk space and workspace count
     let diskStatus: { availableGB: number; thresholdGB: number; status: string } | null = null;
     let workspaceStatus: { count: number; quota: number; status: string } | null = null;
@@ -149,6 +154,14 @@ app.get('/health', async (req, res) => {
           sessionsProcessed: cleanupStats.sessionsProcessed,
           workspacesDeleted: cleanupStats.workspacesDeleted,
           errors: cleanupStats.errors,
+        } : 'not initialized',
+        sessionMonitor: sessionMonitorStats ? {
+          running: sessionMonitorStats.isRunning,
+          lastStaleCheck: sessionMonitorStats.lastStaleCheck,
+          lastLivenessCheck: sessionMonitorStats.lastLivenessCheck,
+          sessionsMarkedStale: sessionMonitorStats.sessionsMarkedStale,
+          sessionsMarkedCrashed: sessionMonitorStats.sessionsMarkedCrashed,
+          errors: sessionMonitorStats.errors,
         } : 'not initialized',
         disk: diskStatus,
         workspaces: workspaceStatus,
@@ -217,6 +230,23 @@ const server = app.listen(port, () => {
     }
   } else {
     logger.info('Scheduled cleanup job is disabled');
+  }
+
+  // Start the session monitor if enabled
+  const enableSessionMonitor = process.env.ENABLE_SESSION_MONITOR !== 'false';
+  if (enableSessionMonitor) {
+    try {
+      startSessionMonitor(db);
+      logger.info('Session monitor started');
+    } catch (error) {
+      logger.error('Failed to start session monitor', {
+        error: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? error.stack : undefined
+      });
+      // Continue running the server - session monitor is not critical for basic operation
+    }
+  } else {
+    logger.info('Session monitor is disabled');
   }
 
   // Start the metrics collection cron job (every minute)
@@ -347,6 +377,9 @@ const shutdown = async (signal: string) => {
 
   // Stop the cleanup job
   stopCleanupJob();
+
+  // Stop the session monitor
+  stopSessionMonitor();
 
   // Close the server
   server.close(() => {
