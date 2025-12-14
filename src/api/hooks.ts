@@ -520,6 +520,8 @@ export function createHookRouter(db: Pool, options: HookRouterOptions = {}) {
   // to prevent information leakage in misconfigured environments
   const metricsHandler: RequestHandler = async (_req, res) => {
     const metrics = retryMetrics.getMetrics();
+    const denominator = metrics.successfulFirstAttempts + metrics.successfulRetries +
+      metrics.failedAfterRetries + metrics.nonRetryableErrors;
     res.json({
       retryMetrics: {
         totalAttempts: metrics.totalAttempts,
@@ -528,13 +530,11 @@ export function createHookRouter(db: Pool, options: HookRouterOptions = {}) {
         failedAfterRetries: metrics.failedAfterRetries,
         nonRetryableErrors: metrics.nonRetryableErrors,
         // Derived metrics
-        successRate: metrics.totalAttempts > 0
-          ? ((metrics.successfulFirstAttempts + metrics.successfulRetries) /
-             (metrics.successfulFirstAttempts + metrics.successfulRetries + metrics.failedAfterRetries + metrics.nonRetryableErrors) * 100).toFixed(2) + '%'
+        successRate: denominator > 0
+          ? ((metrics.successfulFirstAttempts + metrics.successfulRetries) / denominator * 100).toFixed(2) + '%'
           : 'N/A',
-        retryRate: metrics.totalAttempts > 0
-          ? ((metrics.successfulRetries + metrics.failedAfterRetries) /
-             (metrics.successfulFirstAttempts + metrics.successfulRetries + metrics.failedAfterRetries + metrics.nonRetryableErrors) * 100).toFixed(2) + '%'
+        retryRate: denominator > 0
+          ? ((metrics.successfulRetries + metrics.failedAfterRetries) / denominator * 100).toFixed(2) + '%'
           : 'N/A',
       },
       timestamp: new Date().toISOString()
