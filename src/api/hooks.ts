@@ -308,13 +308,16 @@ export function createHookRouter(db: Pool) {
 
       // Scrub secrets from message content before any processing
       let scrubbedMessage = message;
+      const allFoundSecrets: string[] = [];
+
       if (isScrubbingEnabled() && message !== null && message !== undefined) {
         const messageScrub = scrubSecrets(String(message));
         scrubbedMessage = messageScrub.scrubbed;
+        allFoundSecrets.push(...messageScrub.foundSecrets);
 
         // Log scrubbed secrets for audit trail
-        if (messageScrub.foundSecrets.length > 0) {
-          logScrubbedSecrets(messageScrub.foundSecrets, {
+        if (allFoundSecrets.length > 0) {
+          logScrubbedSecrets(allFoundSecrets, {
             sessionId: session,
             eventId,
           });
@@ -405,7 +408,9 @@ export function createHookRouter(db: Pool) {
         messageLength: scrubbedMessage?.length,
         timestamp: eventTimestamp,
         clientTimestamp: !!parsedTimestamp,
-        secretsScrubbed: scrubbedMessage !== message
+        secretsScrubbed: allFoundSecrets.length > 0,
+        secretTypes: allFoundSecrets.length > 0 ? [...new Set(allFoundSecrets)] : undefined,
+        secretCount: allFoundSecrets.length > 0 ? allFoundSecrets.length : undefined
       });
 
       res.status(200).json({
