@@ -61,11 +61,15 @@ CREATE TABLE IF NOT EXISTS command_logs (
     result TEXT,
     status VARCHAR(50) DEFAULT 'completed',
     duration_ms INTEGER,
-    timestamp TIMESTAMP DEFAULT NOW()
+    timestamp TIMESTAMP DEFAULT NOW(),
+    blob_uri VARCHAR(500),  -- URI of blob storage for large results (file:// or s3://)
+    result_size_bytes INTEGER  -- Original size of result in bytes
 );
 
 CREATE INDEX IF NOT EXISTS idx_command_logs_session_id ON command_logs (session_id);
 CREATE INDEX IF NOT EXISTS idx_command_logs_timestamp ON command_logs (timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_command_logs_blob_uri ON command_logs (blob_uri) WHERE blob_uri IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_command_logs_result_size ON command_logs (result_size_bytes DESC) WHERE result_size_bytes IS NOT NULL;
 
 -- Slack thread mapping table
 CREATE TABLE IF NOT EXISTS slack_thread_mapping (
