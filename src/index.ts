@@ -3,7 +3,7 @@ import express from 'express';
 import { Pool } from 'pg';
 import { createRouter } from './api/routes';
 import { createHookRouter } from './api/hooks';
-import { createApiKeyAuth, createHookAuth } from './middleware/auth';
+import { createApiKeyAuth, createHookAuth, createStrictHookAuth, validateProductionSecrets, isProduction } from './middleware/auth';
 import { startRetryDaemon, stopRetryDaemon, getRetryDaemon } from './services/retryDaemon';
 import { startCleanupJob, stopCleanupJob, getCleanupJob } from './services/cleanup-job';
 import { WorkspaceManager } from './services/workspace';
@@ -22,9 +22,25 @@ const db = new Pool({
   connectionString: process.env.DATABASE_URL
 });
 
+// Validate production secrets before proceeding
+const secretsValidation = validateProductionSecrets();
+for (const warning of secretsValidation.warnings) {
+  logger.warn(warning);
+}
+if (!secretsValidation.valid) {
+  for (const error of secretsValidation.errors) {
+    logger.error(error);
+  }
+  if (isProduction()) {
+    logger.error('Refusing to start in production with missing required secrets');
+    process.exit(1);
+  }
+}
+
 // Create authentication middleware
 const apiKeyAuth = createApiKeyAuth(db);
 const hookAuth = createHookAuth();
+const strictHookAuth = createStrictHookAuth();
 
 // Initialize workspace manager for health checks
 let workspaceManager: WorkspaceManager | null = null;
@@ -126,7 +142,8 @@ app.get('/health', async (req, res) => {
 
 // Hook endpoints - use optional shared secret auth (for Claude Code hooks)
 // These are mounted BEFORE the authenticated routes to ensure /api/hooks/* is not affected by apiKeyAuth
-app.use('/api/hooks', hookAuth, createHookRouter(db));
+// The strictAuth middleware is used for sensitive endpoints like /metrics that expose operational data
+app.use('/api/hooks', hookAuth, createHookRouter(db, { strictAuth: strictHookAuth }));
 
 // All other API routes require API key authentication
 app.use('/api', apiKeyAuth, createRouter(db));

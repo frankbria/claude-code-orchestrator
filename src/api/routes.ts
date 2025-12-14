@@ -8,7 +8,12 @@ import {
   revokeApiKey,
   deleteApiKey,
   getSessionById,
+  updateSessionWithVersion,
+  VersionConflictError,
+  SessionStatus,
+  SessionUpdatePayload,
 } from '../db/queries';
+import { updateSessionWithRetry } from '../db/retry';
 import { WorkspaceManager } from '../services/workspace';
 import {
   validateSessionCreate,
@@ -157,82 +162,175 @@ export function createRouter(db: Pool) {
   // List all sessions
   router.get('/sessions', async (req, res) => {
     const sessions = await db.query(
-      `SELECT id, project_path, project_type, status, created_at, updated_at
-       FROM sessions 
+      `SELECT id, project_path, project_type, status, created_at, updated_at, version
+       FROM sessions
        ORDER BY updated_at DESC`
     );
     res.json(sessions.rows);
   });
 
+  // Get single session by ID
+  router.get('/sessions/:id', async (req, res) => {
+    const session = await getSessionById(db, req.params.id);
+    if (!session) {
+      res.status(404).json({
+        error: 'Session not found',
+        code: 'SESSION_NOT_FOUND'
+      });
+      return;
+    }
+    res.json(session);
+  });
+
   // Update session status
+  // Supports optimistic locking via optional 'version' parameter
   router.patch('/sessions/:id', async (req, res) => {
-    const { status, claudeSessionId } = req.body;
+    const { status, claudeSessionId, version } = req.body;
     const requestId = (req as any).id;
     const cleanupConfig = getCleanupConfig();
 
     // Check if this is a terminal status that should trigger cleanup
     const isTerminalStatus = status === 'completed' || status === 'error';
 
-    if (claudeSessionId) {
-      await db.query(
-        `UPDATE sessions SET claude_session_id = $1, updated_at = NOW() WHERE id = $2`,
-        [claudeSessionId, req.params.id]
-      );
-    }
+    try {
+      // If version is provided, use optimistic locking
+      if (version !== undefined) {
+        const expectedVersion = parseInt(version, 10);
+        if (isNaN(expectedVersion) || expectedVersion < 1) {
+          res.status(400).json({
+            error: 'Invalid version number',
+            code: 'INVALID_VERSION'
+          });
+          return;
+        }
 
-    if (status) {
-      await db.query(
-        `UPDATE sessions SET status = $1, updated_at = NOW() WHERE id = $2`,
-        [status, req.params.id]
-      );
+        // Build update payload
+        const updates: SessionUpdatePayload = {};
+        if (status) updates.status = status as SessionStatus;
+        if (claudeSessionId) updates.claude_session_id = claudeSessionId;
 
-      // Trigger automatic cleanup if enabled and status is terminal
-      if (isTerminalStatus && cleanupConfig.enableAutoCleanup) {
         try {
-          // Get session to retrieve project_path
+          const newVersion = await updateSessionWithVersion(
+            db,
+            req.params.id,
+            updates,
+            expectedVersion
+          );
+
+          // Fetch updated session for cleanup check
           const session = await getSessionById(db, req.params.id);
 
-          if (session && session.project_path) {
-            // Skip cleanup for E2B sandboxes
-            if (session.project_path.startsWith('e2b://')) {
-              cleanupLogger.info('Skipping cleanup for E2B sandbox', {
-                requestId,
-                sessionId: req.params.id,
-              });
-            } else {
-              // Perform cleanup asynchronously (don't block the response)
-              workspaceManager.cleanup(session.project_path, requestId)
-                .then(() => {
-                  cleanupLogger.info('Workspace cleanup completed', {
-                    requestId,
-                    sessionId: req.params.id,
-                    projectPath: session.project_path,
-                    status,
-                  });
-                })
-                .catch((error) => {
-                  cleanupLogger.error('Workspace cleanup failed', {
-                    requestId,
-                    sessionId: req.params.id,
-                    projectPath: session.project_path,
-                    error: error.message,
-                  });
-                });
-            }
+          // Trigger cleanup if applicable
+          if (isTerminalStatus && cleanupConfig.enableAutoCleanup && session) {
+            triggerAsyncCleanup(workspaceManager, session, status, requestId, cleanupLogger);
           }
-        } catch (error) {
-          // Log but don't fail the request - cleanup is best-effort
-          cleanupLogger.error('Failed to trigger workspace cleanup', {
-            requestId,
-            sessionId: req.params.id,
-            error: (error as Error).message,
+
+          res.json({
+            status: 'updated',
+            version: newVersion
           });
+          return;
+        } catch (error) {
+          if (error instanceof VersionConflictError) {
+            // Get current session to provide actual version
+            const currentSession = await getSessionById(db, req.params.id);
+            res.status(409).json({
+              error: 'Version conflict - session was modified by another process',
+              code: 'VERSION_CONFLICT',
+              expectedVersion,
+              actualVersion: currentSession?.version,
+              hint: 'Refetch the session and retry with the current version'
+            });
+            return;
+          }
+          throw error;
         }
       }
+
+      // Legacy behavior: update without version check (backward compatible)
+      if (claudeSessionId) {
+        await db.query(
+          `UPDATE sessions SET claude_session_id = $1 WHERE id = $2`,
+          [claudeSessionId, req.params.id]
+        );
+      }
+
+      if (status) {
+        await db.query(
+          `UPDATE sessions SET status = $1 WHERE id = $2`,
+          [status, req.params.id]
+        );
+
+        // Trigger automatic cleanup if enabled and status is terminal
+        if (isTerminalStatus && cleanupConfig.enableAutoCleanup) {
+          try {
+            const session = await getSessionById(db, req.params.id);
+            if (session) {
+              triggerAsyncCleanup(workspaceManager, session, status, requestId, cleanupLogger);
+            }
+          } catch (error) {
+            cleanupLogger.error('Failed to trigger workspace cleanup', {
+              requestId,
+              sessionId: req.params.id,
+              error: (error as Error).message,
+            });
+          }
+        }
+      }
+
+      // Get updated session to return version
+      const updatedSession = await getSessionById(db, req.params.id);
+      res.json({
+        status: 'updated',
+        version: updatedSession?.version
+      });
+    } catch (error) {
+      apiLogger.error('Session update failed', {
+        requestId,
+        sessionId: req.params.id,
+        error: (error as Error).message
+      });
+      res.status(500).json({
+        error: 'Session update failed',
+        code: 'UPDATE_ERROR'
+      });
+    }
+  });
+
+  // Helper function to trigger async cleanup
+  function triggerAsyncCleanup(
+    manager: WorkspaceManager,
+    session: { id: string; project_path: string },
+    status: string,
+    requestId: string,
+    logger: ReturnType<typeof createLogger>
+  ) {
+    if (session.project_path.startsWith('e2b://')) {
+      logger.info('Skipping cleanup for E2B sandbox', {
+        requestId,
+        sessionId: session.id,
+      });
+      return;
     }
 
-    res.json({ status: 'updated' });
-  });
+    manager.cleanup(session.project_path, requestId)
+      .then(() => {
+        logger.info('Workspace cleanup completed', {
+          requestId,
+          sessionId: session.id,
+          projectPath: session.project_path,
+          status,
+        });
+      })
+      .catch((error: Error) => {
+        logger.error('Workspace cleanup failed', {
+          requestId,
+          sessionId: session.id,
+          projectPath: session.project_path,
+          error: error.message,
+        });
+      });
+  }
 
   // Log a message (from Slack/n8n continuation)
   router.post('/sessions/:id/messages', async (req, res) => {

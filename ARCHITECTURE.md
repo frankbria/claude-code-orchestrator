@@ -313,8 +313,10 @@ CREATE TABLE sessions (
     status VARCHAR(50) DEFAULT 'active', -- 'active', 'paused', 'completed', 'error'
     created_at TIMESTAMP DEFAULT NOW(),
     updated_at TIMESTAMP DEFAULT NOW(),
+    version INTEGER NOT NULL DEFAULT 1,  -- Optimistic locking version (auto-increments)
     metadata JSONB DEFAULT '{}'          -- Flexible storage for config, prompts, etc.
 );
+-- See docs/CONCURRENCY.md for optimistic locking implementation details
 
 -- Session Messages: Conversation history
 CREATE TABLE session_messages (
