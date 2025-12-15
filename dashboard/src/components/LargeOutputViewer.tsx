@@ -1,5 +1,5 @@
 // dashboard/src/components/LargeOutputViewer.tsx
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 
 interface LargeOutputViewerProps {
   sessionId: string;
@@ -18,6 +18,7 @@ export function LargeOutputViewer({
   sizeBytes,
   onClose,
 }: LargeOutputViewerProps) {
+  const overlayRef = useRef<HTMLDivElement>(null);
   const [content, setContent] = useState<string>('');
   const [loadingState, setLoadingState] = useState<LoadingState>('idle');
   const [error, setError] = useState<string | null>(null);
@@ -28,13 +29,14 @@ export function LargeOutputViewer({
     return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
   };
 
-  const fetchContent = useCallback(async () => {
+  const fetchContent = useCallback(async (signal?: AbortSignal) => {
     setLoadingState('loading');
     setError(null);
 
     try {
       const response = await fetch(
-        `/api/sessions/${sessionId}/logs/${logId}/output`
+        `/api/sessions/${sessionId}/logs/${logId}/output`,
+        signal ? { signal } : undefined
       );
 
       if (!response.ok) {
@@ -46,13 +48,24 @@ export function LargeOutputViewer({
       setContent(text);
       setLoadingState('loaded');
     } catch (err) {
+      // Don't update state if the request was aborted
+      if (err instanceof Error && err.name === 'AbortError') {
+        return;
+      }
       setError(err instanceof Error ? err.message : 'Failed to load output');
       setLoadingState('error');
     }
   }, [sessionId, logId]);
 
   useEffect(() => {
-    fetchContent();
+    // Focus the overlay for keyboard accessibility
+    overlayRef.current?.focus();
+
+    // Set up abort controller for cleanup
+    const controller = new AbortController();
+    fetchContent(controller.signal);
+
+    return () => controller.abort();
   }, [fetchContent]);
 
   const handleDownload = useCallback(() => {
@@ -82,6 +95,7 @@ export function LargeOutputViewer({
       onClick={onClose}
       onKeyDown={handleKeyDown}
       tabIndex={0}
+      ref={overlayRef}
       role="dialog"
       aria-modal="true"
       aria-labelledby="viewer-title"
