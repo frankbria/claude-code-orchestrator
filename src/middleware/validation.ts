@@ -99,6 +99,7 @@ export async function validateSessionCreate(
     res.status(400).json({
       error: 'Invalid request',
       details: 'Request body required',
+      requestId,
     });
     return;
   }
@@ -117,6 +118,7 @@ export async function validateSessionCreate(
     res.status(400).json({
       error: 'Invalid request',
       details: 'Project type not allowed',
+      requestId,
     });
     return;
   }
@@ -230,6 +232,7 @@ export async function validateSessionCreate(
     res.status(400).json({
       error: 'Invalid request',
       details: 'Validation failed',
+      requestId,
     });
   }
 }

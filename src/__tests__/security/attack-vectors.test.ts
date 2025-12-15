@@ -58,14 +58,15 @@ describe('Security Attack Vector Prevention', () => {
     process.env.WORKSPACE_BASE = testBaseDir;
     process.env.LOG_DIR = path.join(testBaseDir, 'logs');
 
-    // Intercept console.log to capture security logs
+    // Intercept console.log to capture security and cleanup logs
     capturedLogs = [];
     const originalConsoleLog = console.log;
     console.log = jest.fn((message: string) => {
       originalConsoleLog(message); // Still output to console
       try {
         const parsed = JSON.parse(message);
-        if (parsed.category === 'security') {
+        // Capture both security and cleanup logs for comprehensive testing
+        if (parsed.category === 'security' || parsed.category === 'cleanup') {
           capturedLogs.push({
             level: parsed.level,
             message: parsed.message,

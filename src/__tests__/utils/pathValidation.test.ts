@@ -6,14 +6,20 @@ import { getSecureBaseDir, validateWorkspacePath, isAllowedPath } from '../../ut
 // Mock dependencies
 jest.mock('fs');
 jest.mock('fs/promises');
-jest.mock('../../utils/logger', () => ({
-  createLogger: jest.fn(() => ({
+
+// Mock the logger module - the mock logger is created inside the factory
+// and stored on the createLogger mock for tests to access
+jest.mock('../../utils/logger', () => {
+  const mockLogger = {
     info: jest.fn(),
     warn: jest.fn(),
     error: jest.fn(),
     critical: jest.fn(),
-  })),
-}));
+  };
+  return {
+    createLogger: Object.assign(jest.fn(() => mockLogger), { _mockLogger: mockLogger }),
+  };
+});
 
 describe('pathValidation', () => {
   let originalEnv: NodeJS.ProcessEnv;
@@ -293,8 +299,9 @@ describe('pathValidation', () => {
     });
 
     it('should include request ID in security logs', async () => {
+      // Get the shared mock logger instance that was used by the pathValidation module
       const { createLogger } = require('../../utils/logger');
-      const mockLogger = createLogger();
+      const mockLogger = (createLogger as any)._mockLogger;
       const testPath = '/etc/passwd';
       const requestId = 'test-request-123';
 

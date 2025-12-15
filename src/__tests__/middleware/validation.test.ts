@@ -9,14 +9,20 @@ import { createLogger } from '../../utils/logger';
 
 // Mock dependencies
 jest.mock('../../utils/pathValidation');
-jest.mock('../../utils/logger', () => ({
-  createLogger: jest.fn(() => ({
+
+// Mock the logger module - the mock logger is created inside the factory
+// and stored on the createLogger mock for tests to access
+jest.mock('../../utils/logger', () => {
+  const mockLogger = {
     info: jest.fn(),
     warn: jest.fn(),
     error: jest.fn(),
     critical: jest.fn(),
-  })),
-}));
+  };
+  return {
+    createLogger: Object.assign(jest.fn(() => mockLogger), { _mockLogger: mockLogger }),
+  };
+});
 
 describe('validation middleware', () => {
   let mockRequest: Partial<Request>;
@@ -27,8 +33,8 @@ describe('validation middleware', () => {
   let mockLogger: any;
 
   beforeEach(() => {
-    // Setup mock logger
-    mockLogger = createLogger('security');
+    // Get the mock logger from the createLogger mock
+    mockLogger = (createLogger as any)._mockLogger;
 
     // Setup mock request
     mockRequest = {
@@ -296,7 +302,10 @@ describe('validation middleware', () => {
       });
 
       it('should log path traversal attempts in GitHub repo', async () => {
-        mockRequest.body.githubRepo = 'owner/../etc/passwd';
+        // Use a repo name that passes regex but contains '..' to trigger the path traversal check
+        // Note: 'owner/../etc/passwd' fails regex first, so we use 'owner/repo..evil0'
+        // which passes the regex pattern but contains consecutive dots
+        mockRequest.body.githubRepo = 'owner/repo..evil0';
         (mockRequest as any).id = 'test-request-123';
 
         await validateSessionCreate(
