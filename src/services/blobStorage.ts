@@ -238,7 +238,7 @@ export class BlobStorage {
     // Security check: ensure path is within the configured local storage directory
     const resolvedPath = path.resolve(filePath);
     const resolvedBase = path.resolve(this.config.localPath!);
-    if (!resolvedPath.startsWith(resolvedBase)) {
+    if (!resolvedPath.startsWith(resolvedBase + path.sep) && resolvedPath !== resolvedBase) {
       throw new BlobStorageError(
         'Path traversal attempt detected',
         'get',
