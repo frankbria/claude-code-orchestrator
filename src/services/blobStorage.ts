@@ -163,6 +163,17 @@ export class BlobStorage {
     const filePath = path.join(this.config.localPath!, key);
     const dirPath = path.dirname(filePath);
 
+    // Security check: ensure path is within the configured local storage directory
+    const resolvedPath = path.resolve(filePath);
+    const resolvedBase = path.resolve(this.config.localPath!);
+    if (!resolvedPath.startsWith(resolvedBase + path.sep) && resolvedPath !== resolvedBase) {
+      throw new BlobStorageError(
+        'Path traversal attempt detected',
+        'put',
+        key
+      );
+    }
+
     // Ensure parent directory exists
     if (!fs.existsSync(dirPath)) {
       fs.mkdirSync(dirPath, { recursive: true, mode: 0o750 });
