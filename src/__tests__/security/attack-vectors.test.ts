@@ -40,6 +40,7 @@ describe('Security Attack Vector Prevention', () => {
   let testBaseDir: string;
   let originalEnv: NodeJS.ProcessEnv;
   let capturedLogs: Array<{ level: string; message: string; data?: any }>;
+  let originalConsoleLog: typeof console.log;
 
   /**
    * Setup: Create isolated test environment before each test
@@ -60,7 +61,7 @@ describe('Security Attack Vector Prevention', () => {
 
     // Intercept console.log to capture security and cleanup logs
     capturedLogs = [];
-    const originalConsoleLog = console.log;
+    originalConsoleLog = console.log;
     console.log = jest.fn((message: string) => {
       originalConsoleLog(message); // Still output to console
       try {
@@ -86,8 +87,8 @@ describe('Security Attack Vector Prevention', () => {
     // Restore environment
     process.env = originalEnv;
 
-    // Restore console.log
-    (console.log as jest.Mock).mockRestore();
+    // Restore console.log (saved reference, not mockRestore which only works with spyOn)
+    console.log = originalConsoleLog;
 
     // Clean up test directory
     try {
