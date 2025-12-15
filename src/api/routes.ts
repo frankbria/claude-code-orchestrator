@@ -23,6 +23,7 @@ import {
 } from '../middleware/validation';
 import { createLogger } from '../utils/logger';
 import { getCleanupConfig } from '../config/cleanup';
+import { getBlobStorage, BlobStorageError } from '../services/blobStorage';
 
 const apiLogger = createLogger('api');
 const cleanupLogger = createLogger('cleanup');
@@ -140,13 +141,142 @@ export function createRouter(db: Pool) {
   // Get session logs (dashboard polling endpoint)
   router.get('/sessions/:id/logs', async (req, res) => {
     const logs = await db.query(
-      `SELECT * FROM command_logs 
-       WHERE session_id = $1 
-       ORDER BY timestamp DESC 
+      `SELECT id, session_id, tool, input, result, status, duration_ms, timestamp,
+              blob_uri, result_size_bytes
+       FROM command_logs
+       WHERE session_id = $1
+       ORDER BY timestamp DESC
        LIMIT 50`,
       [req.params.id]
     );
     res.json(logs.rows);
+  });
+
+  // Get full output for a specific command log entry
+  // Returns the full result content, either from inline storage or blob storage
+  router.get('/sessions/:id/logs/:logId/output', async (req, res) => {
+    const requestId = (req as any).id;
+
+    try {
+      // Get the log entry
+      const result = await db.query(
+        `SELECT id, session_id, tool, result, blob_uri, result_size_bytes
+         FROM command_logs
+         WHERE id = $1 AND session_id = $2`,
+        [req.params.logId, req.params.id]
+      );
+
+      if (result.rows.length === 0) {
+        res.status(404).json({
+          error: 'Log entry not found',
+          code: 'LOG_NOT_FOUND',
+        });
+        return;
+      }
+
+      const log = result.rows[0];
+
+      // If blob_uri is present, retrieve from blob storage
+      if (log.blob_uri) {
+        try {
+          const blobStorage = getBlobStorage();
+          const stream = await blobStorage.getStream(log.blob_uri);
+
+          // Set response headers for streaming
+          res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+          res.setHeader('Content-Disposition', 'inline');
+          res.setHeader('Cache-Control', 'no-store');
+          res.setHeader('X-Content-Type-Options', 'nosniff');
+          if (log.result_size_bytes) {
+            res.setHeader('X-Original-Size', log.result_size_bytes.toString());
+          }
+
+          // Stop blob reads if client disconnects
+          const cleanup = () => {
+            try { stream.destroy(); } catch {}
+          };
+          res.on('close', cleanup);
+
+          // Pipe the stream to the response
+          stream.pipe(res);
+
+          stream.on('error', (error) => {
+            apiLogger.error('Error streaming blob content', {
+              requestId,
+              logId: req.params.logId,
+              blobUri: log.blob_uri,
+              error: error.message,
+            });
+            // If headers haven't been sent, send an error response
+            if (!res.headersSent) {
+              res.status(500).json({
+                error: 'Failed to retrieve blob content',
+                code: 'BLOB_STREAM_ERROR',
+              });
+            } else {
+              // Can't send JSON once streaming has begun
+              try { res.destroy(error); } catch {}
+            }
+          });
+
+          apiLogger.info('Streaming blob content', {
+            requestId,
+            logId: req.params.logId,
+            sessionId: req.params.id,
+            blobUri: log.blob_uri,
+            resultSizeBytes: log.result_size_bytes,
+          });
+        } catch (blobError) {
+          apiLogger.error('Failed to retrieve blob', {
+            requestId,
+            logId: req.params.logId,
+            blobUri: log.blob_uri,
+            error: blobError instanceof BlobStorageError
+              ? blobError.message
+              : (blobError as Error).message,
+          });
+
+          res.status(500).json({
+            error: 'Failed to retrieve blob content',
+            code: 'BLOB_RETRIEVAL_ERROR',
+            details: blobError instanceof BlobStorageError
+              ? blobError.operation
+              : undefined,
+          });
+        }
+        return;
+      }
+
+      // If no blob_uri, return inline result
+      res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+      res.setHeader('Content-Disposition', 'inline');
+      res.setHeader('Cache-Control', 'no-store');
+      res.setHeader('X-Content-Type-Options', 'nosniff');
+      if (log.result_size_bytes) {
+        res.setHeader('X-Original-Size', log.result_size_bytes.toString());
+      }
+
+      res.send(log.result || '');
+
+      apiLogger.info('Returning inline result', {
+        requestId,
+        logId: req.params.logId,
+        sessionId: req.params.id,
+        resultLength: log.result?.length || 0,
+      });
+    } catch (error) {
+      apiLogger.error('Failed to get log output', {
+        requestId,
+        logId: req.params.logId,
+        sessionId: req.params.id,
+        error: (error as Error).message,
+      });
+
+      res.status(500).json({
+        error: 'Failed to retrieve log output',
+        code: 'LOG_OUTPUT_ERROR',
+      });
+    }
   });
 
   // Get session messages

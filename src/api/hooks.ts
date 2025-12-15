@@ -12,6 +12,7 @@ import {
 import { withOptimisticLockRetry, retryMetrics } from '../db/retry';
 import { scrubSecrets, scrubObjectSecrets, logScrubbedSecrets, isScrubbingEnabled } from '../services/secretScrubber';
 import { hooksReceivedTotal, hookDeliveryLatency, heartbeatRequestsTotal } from '../metrics';
+import { getBlobStorage, BlobStorage, INLINE_THRESHOLD, BlobStorageError } from '../services/blobStorage';
 
 /**
  * Options for configuring the hook router
@@ -293,22 +294,72 @@ export function createHookRouter(db: Pool, options: HookRouterOptions = {}) {
         }
       }
 
+      // Determine result storage strategy (inline vs blob)
+      const resultString = scrubbedResult !== null && scrubbedResult !== undefined
+        ? String(scrubbedResult)
+        : null;
+      const resultSizeBytes = resultString ? Buffer.byteLength(resultString, 'utf-8') : null;
+
+      let inlineResult: string | null = resultString;
+      let blobUri: string | null = null;
+
+      // Store large results in blob storage
+      if (resultString && resultSizeBytes && resultSizeBytes > INLINE_THRESHOLD) {
+        try {
+          const blobStorage = getBlobStorage();
+          const blobKey = BlobStorage.generateKey(resolvedSession.id, tool || 'unknown');
+          blobUri = await blobStorage.put(blobKey, resultString);
+
+          // Store truncated placeholder in inline result
+          inlineResult = `[Output stored in blob storage (${resultSizeBytes} bytes) - URI: ${blobUri}]`;
+
+          logger.info('Large result stored in blob storage', {
+            eventId,
+            sessionId: resolvedSession.id,
+            tool,
+            resultSizeBytes,
+            blobUri,
+          });
+        } catch (blobError) {
+          // If blob storage fails, fall back to truncated inline storage
+          logger.error('Blob storage failed, falling back to truncated inline storage', {
+            eventId,
+            sessionId: resolvedSession.id,
+            tool,
+            resultSizeBytes,
+            error: blobError instanceof BlobStorageError
+              ? blobError.message
+              : (blobError as Error).message,
+          });
+
+          // Truncate to a reasonable size for inline storage (50KB)
+          const maxInlineSize = 50 * 1024;
+          if (resultString.length > maxInlineSize) {
+            inlineResult = resultString.slice(0, maxInlineSize) +
+              `\n\n[TRUNCATED - Original size: ${resultSizeBytes} bytes. Blob storage failed: ${(blobError as Error).message}]`;
+          }
+        }
+      }
+
       // Insert the new event using resolved session UUID
       // Note: Using scrubbed values to prevent secret exposure in database
       await db.query(
         `INSERT INTO command_logs (
           session_id, tool, input, result, status, duration_ms, timestamp,
-          event_id, delivery_status, delivery_attempts, last_delivery_attempt
+          event_id, delivery_status, delivery_attempts, last_delivery_attempt,
+          blob_uri, result_size_bytes
         )
-        VALUES ($1, $2, $3, $4, 'completed', $5, $6, $7, 'delivered', 1, NOW())`,
+        VALUES ($1, $2, $3, $4, 'completed', $5, $6, $7, 'delivered', 1, NOW(), $8, $9)`,
         [
           resolvedSession.id,
           tool,
           scrubbedInput !== null && scrubbedInput !== undefined ? JSON.stringify(scrubbedInput) : null,
-          scrubbedResult !== null && scrubbedResult !== undefined ? scrubbedResult : null,
+          inlineResult,
           durationMs !== null && durationMs !== undefined ? durationMs : null,
           eventTimestamp,
-          eventId !== null && eventId !== undefined ? eventId : null
+          eventId !== null && eventId !== undefined ? eventId : null,
+          blobUri,
+          resultSizeBytes
         ]
       );
 
@@ -363,7 +414,10 @@ export function createHookRouter(db: Pool, options: HookRouterOptions = {}) {
         clientTimestamp: !!parsedTimestamp,
         sessionUpdateAttempts: updateResult.attempts,
         sessionUpdateSuccess: updateResult.success,
-        secretsScrubbed: allFoundSecrets.length > 0
+        secretsScrubbed: allFoundSecrets.length > 0,
+        resultSizeBytes,
+        storedInBlob: !!blobUri,
+        blobUri: blobUri || undefined,
       });
 
       res.status(200).json({
