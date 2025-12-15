@@ -185,9 +185,17 @@ export function createRouter(db: Pool) {
           // Set response headers for streaming
           res.setHeader('Content-Type', 'text/plain; charset=utf-8');
           res.setHeader('Content-Disposition', 'inline');
+          res.setHeader('Cache-Control', 'no-store');
+          res.setHeader('X-Content-Type-Options', 'nosniff');
           if (log.result_size_bytes) {
             res.setHeader('X-Original-Size', log.result_size_bytes.toString());
           }
+
+          // Stop blob reads if client disconnects
+          const cleanup = () => {
+            try { stream.destroy(); } catch {}
+          };
+          res.on('close', cleanup);
 
           // Pipe the stream to the response
           stream.pipe(res);
@@ -205,6 +213,9 @@ export function createRouter(db: Pool) {
                 error: 'Failed to retrieve blob content',
                 code: 'BLOB_STREAM_ERROR',
               });
+            } else {
+              // Can't send JSON once streaming has begun
+              try { res.destroy(error); } catch {}
             }
           });
 
@@ -239,6 +250,8 @@ export function createRouter(db: Pool) {
       // If no blob_uri, return inline result
       res.setHeader('Content-Type', 'text/plain; charset=utf-8');
       res.setHeader('Content-Disposition', 'inline');
+      res.setHeader('Cache-Control', 'no-store');
+      res.setHeader('X-Content-Type-Options', 'nosniff');
       if (log.result_size_bytes) {
         res.setHeader('X-Original-Size', log.result_size_bytes.toString());
       }
